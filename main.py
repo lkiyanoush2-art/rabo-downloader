@@ -7,6 +7,7 @@ import threading
 import http.server
 import urllib.request
 import urllib.parse
+import json
 from typing import Dict, Any, Optional
 
 from pyrogram import Client, filters
@@ -326,6 +327,77 @@ async def text_fallback_handler(_, message: Message):
             "• لینک ویدیوی یوتیوب، تیک‌تاک یا توییتر"
         )
 
+async def prepare_video_metadata(file_path: str) -> Dict[str, Any]:
+    faststart_path = f"{file_path}.fast.mp4"
+    thumb_path = f"{file_path}.thumb.jpg"
+
+    # 1. Apply Faststart (relocate moov atom to the front for instant streaming playback)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", file_path, "-c", "copy", "-movflags", "+faststart", faststart_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if os.path.exists(faststart_path) and os.path.getsize(faststart_path) > 1000:
+            os.replace(faststart_path, file_path)
+    except Exception as e:
+        print(f"Faststart notice: {e}", flush=True)
+
+    duration = 0
+    width = 1280
+    height = 720
+
+    # 2. Extract precise duration, width, and height using ffprobe
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration",
+            "-show_entries", "format=duration",
+            "-of", "json", file_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        stdout, _ = await proc.communicate()
+        data = json.loads(stdout.decode('utf-8', errors='ignore'))
+
+        if "format" in data and "duration" in data["format"]:
+            duration = int(float(data["format"]["duration"]))
+        elif "streams" in data and len(data["streams"]) > 0 and "duration" in data["streams"][0]:
+            duration = int(float(data["streams"][0]["duration"]))
+
+        if "streams" in data and len(data["streams"]) > 0:
+            width = int(data["streams"][0].get("width", 1280))
+            height = int(data["streams"][0].get("height", 720))
+    except Exception as e:
+        print(f"ffprobe notice: {e}", flush=True)
+
+    # 3. Generate crisp thumbnail preview image
+    has_thumb = False
+    try:
+        ss_time = "00:00:01" if duration > 2 else "00:00:00"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-ss", ss_time, "-i", file_path, "-vframes", "1", "-q:v", "2", thumb_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+            has_thumb = True
+    except Exception as e:
+        print(f"Thumbnail notice: {e}", flush=True)
+
+    return {
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "thumb": thumb_path if has_thumb else None
+    }
+
 @bot.on_callback_query()
 async def callback_handler(client: Client, cq: CallbackQuery):
     data = cq.data or ""
@@ -426,7 +498,6 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         except Exception as e:
             await status_msg.edit_text(f"❌ <b>خطا در دانلود ویدیو:</b>\n<code>{str(e)[:150]}</code>")
             return
-
     if not os.path.exists(downloaded_file):
         await status_msg.edit_text("❌ فایل نهایی یافت نشد.")
         return
@@ -440,7 +511,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
     )
 
     start_time = time.time()
-    await status_msg.edit_text("🚀 <b>در حال ارسال فایل به تلگرام (تا سقف ۲ گیگ)...</b>")
+    await status_msg.edit_text("🚀 <b>در حال آماده‌سازی و ارسال به تلگرام (تا سقف ۲ گیگ)...</b>")
+
+    meta: Dict[str, Any] = {"duration": 0, "width": 1280, "height": 720, "thumb": None}
+    if quality != "audio":
+        meta = await prepare_video_metadata(downloaded_file)
 
     try:
         if quality == "audio":
@@ -458,6 +533,10 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 chat_id=cq.message.chat.id,
                 video=downloaded_file,
                 caption=caption,
+                duration=meta["duration"],
+                width=meta["width"],
+                height=meta["height"],
+                thumb=meta["thumb"],
                 supports_streaming=True,
                 progress=progress_tracker,
                 progress_args=(status_msg, "در حال آپلود ویدیو به تلگرام", start_time),
@@ -469,6 +548,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         if os.path.exists(downloaded_file):
             try:
                 os.remove(downloaded_file)
+            except Exception:
+                pass
+        if meta.get("thumb") and os.path.exists(meta["thumb"]):
+            try:
+                os.remove(meta["thumb"])
             except Exception:
                 pass
 
