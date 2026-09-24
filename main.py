@@ -1,12 +1,13 @@
 import os
-import asyncio
-import re
+import sys
 import time
+import re
+import asyncio
+import threading
+import http.server
+import urllib.request
 from typing import Dict, Any, Optional
 
-from contextlib import asynccontextmanager
-import uvicorn
-from fastapi import FastAPI
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message,
@@ -15,6 +16,8 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 import yt_dlp
+import aiohttp
+import aiofiles
 
 # ============================================================================
 # Configurations & Credentials
@@ -40,64 +43,6 @@ bot = Client(
     bot_token=BOT_TOKEN,
     workdir="/app",
 )
-
-# ============================================================================
-# FastAPI Health Service (For Render 24/7 Keep-Alive via UptimeRobot)
-# ============================================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("🚀 [Startup] Initializing Telegram Downloader Service...", flush=True)
-
-    # 1. Clean up any leftover webhooks so Pyrogram MTProto receives all updates
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
-                res = await resp.json()
-                print(f"🗑️ [Webhook Cleanup] {res}", flush=True)
-    except Exception as e:
-        print(f"⚠️ [Webhook Cleanup Warning] {e}", flush=True)
-
-    # 2. Start Pyrogram MTProto Bot Client
-    print("🤖 [Startup] Connecting Pyrogram MTProto Bot Client to Telegram...", flush=True)
-    try:
-        await bot.start()
-        me = await bot.get_me()
-        print(f"✅ [Online] Bot @{me.username} ({me.first_name}) is fully active and listening!", flush=True)
-    except Exception as e:
-        print(f"❌ [Error] Failed to start Pyrogram Bot: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-
-    yield
-
-    print("🛑 [Shutdown] Stopping Pyrogram Bot...", flush=True)
-    try:
-        await bot.stop()
-    except Exception as e:
-        print(f"⚠️ [Shutdown Warning] {e}", flush=True)
-
-app = FastAPI(lifespan=lifespan)
-
-@app.get("/")
-async def health_check():
-    return {
-        "status": "online",
-        "service": "Telegram 2GB Downloader Bot",
-        "platform": "Render.com Free Tier (Keep-Alive Active)",
-        "max_file_size": "2000 MB (2 GB)",
-    }
-
-@app.get("/delete-webhook")
-async def trigger_delete_webhook():
-    import aiohttp
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
-                data = await resp.json()
-                return {"status": "ok", "telegram_response": data}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
 
 def format_bytes(size: int) -> str:
     if not size or size <= 0:
@@ -146,12 +91,20 @@ async def progress_tracker(current: int, total: int, status_msg: Message, action
 # ============================================================================
 # Telegram Handlers
 # ============================================================================
+
+# Debug logger: Prints every single message received to Render logs
+@bot.on_message(group=-1)
+async def log_all_updates(_, message: Message):
+    sender = message.from_user.username if (message.from_user and message.from_user.username) else (message.from_user.id if message.from_user else "Unknown")
+    print(f"📩 [Incoming Telegram Message] From @{sender} (ID: {message.chat.id}): {message.text or message.caption or '[Media]'}", flush=True)
+
 @bot.on_message(filters.command("start"))
 async def start_handler(_, message: Message):
     welcome = (
         "👋 <b>به ربات دانلود مدیا تا سقف ۲ گیگابایت خوش آمدید!</b>\n\n"
         "⚡ <i>بدون محدودیت ۵۰ مگابایت — قابلیت دانلود و ارسال تا ۲۰۰۰ مگابایت!</i>\n\n"
         "🚀 <b>سایت‌های پشتیبانی‌شده:</b>\n"
+        "• ویدیوهای <b>Bunkr</b> (با نهایت سرعت و کیفیت اصلی)\n"
         "• اینستاگرام (Reels، پست‌ها، استوری)\n"
         "• توییتر / X (تمام کیفیت‌های 1080p, 720p, 480p)\n"
         "• یوتیوب (کیفیت‌های HD و 4K تا ۲ گیگ)\n"
@@ -171,7 +124,6 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
         "Accept-Language": "en-US,en;q=0.5",
     }
     try:
-        import aiohttp
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), allow_redirects=True) as resp:
                 if resp.status != 200:
@@ -220,12 +172,12 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                         "referer": referer,
                     }
     except Exception as e:
-        print(f"[Bunkr] Resolution error: {e}")
+        print(f"[Bunkr] Resolution error: {e}", flush=True)
     return None
 
 @bot.on_message(filters.regex(r"https?://[^\s]+"))
 async def link_handler(_, message: Message):
-    url = re.search(r"https?://[^\s]+", message.text).group(0)
+    url = re.search(r"https?://[^\s]+", message.text or "").group(0)
     status_msg = await message.reply_text("🔎 <b>در حال تحلیل لینک و دریافت مشخصات...</b>")
 
     loop = asyncio.get_event_loop()
@@ -307,6 +259,19 @@ async def link_handler(_, message: Message):
 
     await message.reply_text(menu_text, reply_markup=buttons)
 
+# Fallback helper for non-link messages
+@bot.on_message(filters.text & ~filters.command("start"))
+async def text_fallback_handler(_, message: Message):
+    text = message.text or ""
+    if not re.search(r"https?://[^\s]+", text):
+        await message.reply_text(
+            "📥 <b>لطفاً یک لینک معتبر ارسال کنید!</b>\n\n"
+            "مثال:\n"
+            "• لینک ویدیوی Bunkr\n"
+            "• لینک ریلز از اینستاگرام\n"
+            "• لینک ویدیوی یوتیوب، تیک‌تاک یا توییتر"
+        )
+
 @bot.on_callback_query()
 async def callback_handler(client: Client, cq: CallbackQuery):
     data = cq.data or ""
@@ -351,8 +316,6 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             dl_headers["Referer"] = item["referer"]
 
         try:
-            import aiohttp
-            import aiofiles
             async with aiohttp.ClientSession(headers=dl_headers) as session:
                 async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
                     if resp.status not in (200, 206):
@@ -456,7 +419,55 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 pass
 
 # ============================================================================
-# Main Entrypoint: Start FastAPI with Lifespan (Starts Pyrogram + Web Server)
+# Background Web Server (Guarantees Render Keeps Service Live 24/7)
 # ============================================================================
+class HealthServerHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"online","service":"Telegram 2GB Downloader Bot","max_size":"2GB"}')
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Quiet logs
+
+def start_health_server():
+    server = http.server.HTTPServer(("0.0.0.0", PORT), HealthServerHandler)
+    print(f"🌐 [Web] HTTP Health Server running on port {PORT}...", flush=True)
+    server.serve_forever()
+
+def cleanup_webhook():
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read().decode()
+            print(f"🗑️ [Webhook Cleanup] {data}", flush=True)
+    except Exception as e:
+        print(f"⚠️ [Webhook Cleanup Warning] {e}", flush=True)
+
+# ============================================================================
+# Main Entrypoint: Pure Pyrogram Runner + Background Keep-Alive Server
+# ============================================================================
+def main():
+    print("🚀 [Boot] Starting 2GB Media Downloader Service...", flush=True)
+
+    # 1. Start HTTP Health Server on a background thread (Instantly satisfies Render's port checker)
+    web_thread = threading.Thread(target=start_health_server, daemon=True)
+    web_thread.start()
+
+    # 2. Delete any conflicting webhooks so Pyrogram MTProto receives all updates
+    cleanup_webhook()
+
+    # 3. Start Pyrogram on the main event loop natively (100% reliable, zero loop conflict)
+    print("🤖 [Startup] Launching Pyrogram MTProto Bot Client...", flush=True)
+    bot.run()
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    main()
