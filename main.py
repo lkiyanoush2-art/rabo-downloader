@@ -43,6 +43,17 @@ async def health_check():
         "max_file_size": "2000 MB (2 GB)",
     }
 
+@app.get("/delete-webhook")
+async def trigger_delete_webhook():
+    import aiohttp
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
+                data = await resp.json()
+                return {"status": "ok", "telegram_response": data}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 # ============================================================================
 # Pyrogram Telegram Bot Client (MTProto - Supports up to 2 GB)
 # ============================================================================
@@ -417,6 +428,16 @@ async def main():
     print(f"🚀 Starting FastAPI Server on port {PORT}...")
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning")
     server = uvicorn.Server(config)
+
+    # Automatically delete any old webhooks (e.g. from Supabase) so Pyrogram MTProto receives all updates
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
+                res = await resp.json()
+                print(f"🗑️ Cleaned up Telegram webhook: {res}")
+    except Exception as e:
+        print(f"⚠️ Webhook cleanup notice: {e}")
 
     print("🤖 Starting Pyrogram MTProto Bot Client...")
     await bot.start()
