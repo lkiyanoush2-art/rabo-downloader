@@ -254,27 +254,63 @@ async def resolve_twitter(url: str) -> Optional[Dict[str, Any]]:
                     if videos:
                         v = videos[0]
                         formats = v.get("formats", [])
-                        best_mp4 = v.get("url")
                         variants = []
                         if formats:
                             for f in formats:
-                                if f.get("url") and f.get("container") == "mp4":
+                                v_url = f.get("url")
+                                if v_url and f.get("container") == "mp4":
+                                    bitrate = int(f.get("bitrate", 0) or 0)
+                                    size = int(f.get("size", 0) or 0)
+                                    # Extract resolution from URL path (e.g. /1920x1080/ or /720x1280/)
+                                    res_m = re.search(r'/(\d+)x(\d+)/', v_url)
+                                    if res_m:
+                                        d1, d2 = int(res_m.group(1)), int(res_m.group(2))
+                                        h = min(d1, d2)
+                                        w = max(d1, d2)
+                                    else:
+                                        h = int(f.get("height", 0) or 0)
+                                        w = int(f.get("width", 0) or 0)
                                     variants.append({
-                                        "url": f["url"],
-                                        "height": f.get("height", 720),
-                                        "size": f.get("size", 0),
-                                        "bitrate": f.get("bitrate", 0),
+                                        "url": v_url,
+                                        "height": h,
+                                        "width": w,
+                                        "size": size,
+                                        "bitrate": bitrate,
                                     })
-                        variants.sort(key=lambda x: x.get("height", 0), reverse=True)
-                        if not best_mp4 and variants:
-                            best_mp4 = variants[0]["url"]
+
+                        # Sort strictly by resolution descending, then bitrate descending
+                        variants.sort(key=lambda x: (x.get("height", 0), x.get("bitrate", 0)), reverse=True)
+
+                        best_mp4 = variants[0]["url"] if variants else v.get("url")
+                        if variants:
+                            url_1080 = variants[0]["url"]
+                            v_720 = next((var for var in variants if var.get("height", 0) <= 720), None)
+                            url_720 = v_720["url"] if v_720 else variants[0]["url"]
+                        else:
+                            url_1080 = best_mp4
+                            url_720 = best_mp4
+
+                        quality_urls = {
+                            "1080": url_1080,
+                            "720": url_720,
+                            "audio": url_720 or url_1080,
+                        }
+
+                        duration = int(v.get("duration", 0))
+                        calc_filesize = 0
+                        if variants and variants[0].get("size"):
+                            calc_filesize = variants[0]["size"]
+                        elif variants and variants[0].get("bitrate") and duration:
+                            calc_filesize = int(variants[0]["bitrate"] * duration / 8)
 
                         return {
                             "type": "video",
-                            "url": best_mp4,
+                            "url": url_1080 or best_mp4,
+                            "quality_urls": quality_urls,
                             "variants": variants,
+                            "filesize": calc_filesize,
                             "thumbnail": v.get("thumbnail_url"),
-                            "duration": int(v.get("duration", 0)),
+                            "duration": duration,
                             "uploader": f"{author_name} (@{screen_name})",
                             "title": text[:80] if text else "Twitter Video",
                             "text": text,
@@ -320,17 +356,41 @@ async def resolve_twitter(url: str) -> Optional[Dict[str, Any]]:
                         variants = []
                         for var in video_info.get("variants", []):
                             if var.get("content_type") == "video/mp4":
+                                v_url = var.get("url", "")
+                                bitrate = int(var.get("bitrate", 0) or 0)
+                                res_m = re.search(r'/(\d+)x(\d+)/', v_url)
+                                if res_m:
+                                    d1, d2 = int(res_m.group(1)), int(res_m.group(2))
+                                    h = min(d1, d2)
+                                    w = max(d1, d2)
+                                else:
+                                    h = 0
+                                    w = 0
                                 variants.append({
-                                    "url": var.get("url"),
-                                    "bitrate": var.get("bitrate", 0),
+                                    "url": v_url,
+                                    "height": h,
+                                    "width": w,
+                                    "bitrate": bitrate,
                                 })
-                        variants.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+                        variants.sort(key=lambda x: (x.get("height", 0), x.get("bitrate", 0)), reverse=True)
                         if variants:
+                            url_1080 = variants[0]["url"]
+                            v_720 = next((var for var in variants if var.get("height", 0) <= 720), None)
+                            url_720 = v_720["url"] if v_720 else variants[0]["url"]
+                            quality_urls = {
+                                "1080": url_1080,
+                                "720": url_720,
+                                "audio": url_720 or url_1080,
+                            }
+                            duration = int(video_info.get("duration_millis", 0) / 1000) if video_info.get("duration_millis") else 0
+                            calc_filesize = int(variants[0]["bitrate"] * duration / 8) if duration and variants[0].get("bitrate") else 0
                             return {
                                 "type": "video",
-                                "url": variants[0]["url"],
+                                "url": url_1080,
+                                "quality_urls": quality_urls,
                                 "variants": variants,
-                                "duration": 0,
+                                "filesize": calc_filesize,
+                                "duration": duration,
                                 "uploader": f"{author_name} (@{screen_name})",
                                 "title": text[:80] if text else "Twitter Video",
                                 "text": text,
@@ -610,6 +670,7 @@ async def link_handler(client: Client, message: Message):
     CACHE[cache_id] = {
         "url": url,
         "direct_url": info.get("url") if info.get("is_direct") else None,
+        "quality_urls": info.get("quality_urls", {}),
         "is_direct": info.get("is_direct", False),
         "referer": info.get("referer"),
         "title": info.get("title", "Video"),
@@ -780,11 +841,17 @@ async def callback_handler(client: Client, cq: CallbackQuery):
     is_direct = item.get("is_direct", False)
     direct_url = item.get("direct_url")
 
-    # Pick specific direct variant if available (e.g. from Twitter)
-    variants = item.get("variants", [])
-    if variants:
-        if quality == "720" and len(variants) > 1:
-            direct_url = variants[1]["url"]
+    # If quality_urls mapping is present (e.g. from Twitter), pick the exact matched URL
+    quality_urls = item.get("quality_urls", {})
+    if quality in quality_urls and quality_urls[quality]:
+        direct_url = quality_urls[quality]
+    elif item.get("variants"):
+        variants = item.get("variants", [])
+        if quality == "1080":
+            direct_url = variants[0]["url"]
+        elif quality == "720":
+            v_720 = next((v for v in variants if v.get("height", 0) <= 720), None)
+            direct_url = v_720["url"] if v_720 else variants[0]["url"]
         else:
             direct_url = variants[0]["url"]
 
@@ -861,19 +928,20 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         return
 
     file_size = os.path.getsize(downloaded_file)
+    meta: Dict[str, Any] = {"duration": 0, "width": 1280, "height": 720, "thumb": None}
+    if quality != "audio":
+        meta = await prepare_video_metadata(downloaded_file)
+
+    quality_display = f"{meta['height']}p" if quality != "audio" and meta.get("height") else quality
     caption = (
         f"🌐 <b>{item.get('title', 'Video')}</b>\n"
-        f"🎯 <b>Quality:</b> <code>{quality} [{format_bytes(file_size)}]</code>\n"
+        f"🎯 <b>Quality:</b> <code>{quality_display} [{format_bytes(file_size)}]</code>\n"
         f"👤 <b>Source:</b> {item.get('uploader', 'Web')}\n\n"
         f"⚡ <i>Downloaded by @Rabodownloaderbot</i>"
     )
 
     start_time = time.time()
-    await status_msg.edit_text("🚀 <b>Preparing and uploading to Telegram (up to 2 GB)...</b>")
-
-    meta: Dict[str, Any] = {"duration": 0, "width": 1280, "height": 720, "thumb": None}
-    if quality != "audio":
-        meta = await prepare_video_metadata(downloaded_file)
+    await status_msg.edit_text("🚀 <b>Uploading to Telegram (up to 2 GB)...</b>")
 
     try:
         if quality == "audio":
