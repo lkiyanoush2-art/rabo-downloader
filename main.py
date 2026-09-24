@@ -84,8 +84,8 @@ async def progress_tracker(current: int, total: int, status_msg: Message, action
     text = (
         f"⚡ <b>{action_name}...</b>\n\n"
         f"<code>[{bar}] {percent:.1f}%</code>\n"
-        f"📊 <b>حجم:</b> <code>{format_bytes(current)} / {format_bytes(total)}</code>\n"
-        f"🚀 <b>سرعت:</b> <code>{speed_str}</code>"
+        f"📊 <b>Size:</b> <code>{format_bytes(current)} / {format_bytes(total)}</code>\n"
+        f"🚀 <b>Speed:</b> <code>{speed_str}</code>"
     )
     try:
         await status_msg.edit_text(text)
@@ -500,22 +500,22 @@ async def log_all_updates(_, message: Message):
 @bot.on_message(filters.command("start"))
 async def start_handler(_, message: Message):
     welcome = (
-        "👋 <b>به ربات دانلود مدیا تا سقف ۲ گیگابایت خوش آمدید!</b>\n\n"
-        "⚡ <i>پشتیبانی از عکس‌ها و ویدیوهای تمام پلتفرم‌ها:</i>\n\n"
-        "🚀 <b>سایت‌های پشتیبانی‌شده:</b>\n"
-        "• <b>Bunkr</b> (ویدیو با کیفیت اصلی و سرعت بالا)\n"
-        "• <b>توییتر / X</b> (عکس‌های تکی و آلبومی + ویدیوهای 1080p)\n"
-        "• <b>اینستاگرام</b> (Reels، پست‌های ویدیویی و عکس‌های آلبومی)\n"
-        "• <b>یوتیوب و تیک‌تاک</b> (ویدیو و صدا)\n"
-        "• <b>تمام لینک‌های مستقیم ویدیو و مدیا</b>\n\n"
-        "📥 <b>کافیست لینک پست یا ویدیوی مورد نظر را در چت ارسال کنید!</b>"
+        "👋 <b>Welcome to the 2GB Media Downloader Bot!</b>\n\n"
+        "⚡ <i>Supports photos, carousels, and videos up to 2000 MB!</i>\n\n"
+        "🚀 <b>Supported Platforms:</b>\n"
+        "• <b>Bunkr</b> (Original quality, fast CDN streaming)\n"
+        "• <b>Twitter / X</b> (Photos, multi-image galleries, and 1080p videos)\n"
+        "• <b>Instagram</b> (Reels, video posts, single photos, and carousels)\n"
+        "• <b>YouTube & TikTok</b> (HD Video & Audio)\n"
+        "• <b>Direct media and video links</b>\n\n"
+        "📥 <b>Simply send any post or video link to get started!</b>"
     )
     await message.reply_text(welcome)
 
 @bot.on_message(filters.regex(r"https?://[^\s]+"))
 async def link_handler(client: Client, message: Message):
     url = re.search(r"https?://[^\s]+", message.text or "").group(0)
-    status_msg = await message.reply_text("🔎 <b>در حال تحلیل لینک و دریافت مشخصات...</b>")
+    status_msg = await message.reply_text("🔎 <b>Analyzing link and retrieving metadata...</b>")
 
     loop = asyncio.get_event_loop()
     info = None
@@ -560,11 +560,11 @@ async def link_handler(client: Client, message: Message):
                     "is_direct": False,
                 }
         except Exception as e:
-            await status_msg.edit_text(f"❌ <b>خطا در دریافت مشخصات:</b>\n<code>{str(e)[:150]}</code>")
+            await status_msg.edit_text(f"❌ <b>Error retrieving metadata:</b>\n<code>{str(e)[:150]}</code>")
             return
 
     if not info:
-        await status_msg.edit_text("❌ مدیایی در این لینک یافت نشد.")
+        await status_msg.edit_text("❌ No media found in this link.")
         return
 
     # ========================================================================
@@ -573,10 +573,10 @@ async def link_handler(client: Client, message: Message):
     if info.get("type") == "photos":
         photos = info.get("photos", [])
         if not photos:
-            await status_msg.edit_text("❌ تصویری در این لینک یافت نشد.")
+            await status_msg.edit_text("❌ No photos found in this link.")
             return
 
-        await status_msg.edit_text("🚀 <b>در حال ارسال تصاویر به تلگرام...</b>")
+        await status_msg.edit_text("🚀 <b>Sending photos to Telegram...</b>")
         uploader = info.get("uploader", "Social Media")
         caption = f"📸 <b>{uploader}</b>\n\n⚡ <i>@Rabodownloaderbot</i>"
         if info.get("text"):
@@ -600,7 +600,7 @@ async def link_handler(client: Client, message: Message):
                 )
             await status_msg.delete()
         except Exception as e:
-            await status_msg.edit_text(f"❌ <b>خطا در ارسال تصاویر:</b>\n<code>{str(e)[:150]}</code>")
+            await status_msg.edit_text(f"❌ <b>Error sending photos:</b>\n<code>{str(e)[:150]}</code>")
         return
 
     # ========================================================================
@@ -631,14 +631,14 @@ async def link_handler(client: Client, message: Message):
         f"2. <i>mp4, 720p</i>\n\n"
         f"🎧 <b>Audio</b>\n"
         f"3. <i>m4a, mp3</i>\n\n"
-        f"⚡ <i>کیفیت مورد نظر را انتخاب کنید:</i>"
+        f"⚡ <i>Select desired format:</i>"
     )
 
     buttons = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📹 1080p", callback_data=f"dl:{cache_id}:1080"),
             InlineKeyboardButton("📹 720p", callback_data=f"dl:{cache_id}:720"),
-            InlineKeyboardButton("♫ صدا (Audio)", callback_data=f"dl:{cache_id}:audio"),
+            InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio"),
         ],
         [
             InlineKeyboardButton("⟳ Refresh metadata", callback_data=f"refresh:{cache_id}"),
@@ -666,12 +666,12 @@ async def text_fallback_handler(_, message: Message):
     text = message.text or ""
     if not re.search(r"https?://[^\s]+", text):
         await message.reply_text(
-            "📥 <b>لطفاً یک لینک معتبر ارسال کنید!</b>\n\n"
-            "مثال:\n"
-            "• لینک ویدیوی Bunkr\n"
-            "• لینک پست یا ریلز اینستاگرام (عکس یا ویدیو)\n"
-            "• لینک پست توییتر / X (عکس یا ویدیو)\n"
-            "• لینک ویدیوی یوتیوب، تیک‌تاک و..."
+            "📥 <b>Please send a valid link!</b>\n\n"
+            "Examples:\n"
+            "• Bunkr video link\n"
+            "• Instagram post or reel (photos or video)\n"
+            "• Twitter / X post (photos or video)\n"
+            "• YouTube, TikTok, or direct video link"
         )
 
 async def prepare_video_metadata(file_path: str) -> Dict[str, Any]:
@@ -750,7 +750,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
     data = cq.data or ""
 
     if data == "back":
-        await cq.answer("بازگشت")
+        await cq.answer("Back")
         try:
             await cq.message.delete()
         except Exception:
@@ -758,7 +758,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         return
 
     if data.startswith("refresh:"):
-        await cq.answer("مشخصات بازخوانی شد ✅")
+        await cq.answer("Metadata refreshed ✅")
         return
 
     if not data.startswith("dl:"):
@@ -767,11 +767,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
     _, cache_id, quality = data.split(":")
     item = CACHE.get(cache_id)
     if not item:
-        await cq.answer("لینک منقضی شده است. لطفاً دوباره آن را ارسال کنید.", show_alert=True)
+        await cq.answer("Link expired. Please resend the link.", show_alert=True)
         return
 
-    await cq.answer("⏳ در حال دانلود و آماده‌سازی...")
-    status_msg = await cq.message.reply_text(f"⏳ <b>در حال دانلود کیفیت {quality} بر روی سرور...</b>")
+    await cq.answer("⏳ Downloading and preparing...")
+    status_msg = await cq.message.reply_text(f"⏳ <b>Downloading {quality} to server...</b>")
 
     target_url = item["url"]
     file_id = f"{cache_id}_{quality}"
@@ -800,7 +800,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             async with aiohttp.ClientSession(headers=dl_headers) as session:
                 async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
                     if resp.status not in (200, 206):
-                        raise Exception(f"خطای سرور دانلود (کد {resp.status})")
+                        raise Exception(f"Download server error (HTTP {resp.status})")
                     async with aiofiles.open(downloaded_file, "wb") as f:
                         async for chunk in resp.content.iter_chunked(1024 * 1024):
                             await f.write(chunk)
@@ -820,7 +820,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                         pass
                     downloaded_file = audio_file
         except Exception as e:
-            await status_msg.edit_text(f"❌ <b>خطا در دانلود فایل:</b>\n<code>{str(e)[:150]}</code>")
+            await status_msg.edit_text(f"❌ <b>Error downloading file:</b>\n<code>{str(e)[:150]}</code>")
             return
     else:
         out_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
@@ -853,23 +853,23 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 if os.path.exists(f"{base}.mp4"):
                     downloaded_file = f"{base}.mp4"
         except Exception as e:
-            await status_msg.edit_text(f"❌ <b>خطا در دانلود ویدیو:</b>\n<code>{str(e)[:150]}</code>")
+            await status_msg.edit_text(f"❌ <b>Error downloading video:</b>\n<code>{str(e)[:150]}</code>")
             return
 
     if not os.path.exists(downloaded_file):
-        await status_msg.edit_text("❌ فایل نهایی یافت نشد.")
+        await status_msg.edit_text("❌ Final file not found.")
         return
 
     file_size = os.path.getsize(downloaded_file)
     caption = (
         f"🌐 <b>{item.get('title', 'Video')}</b>\n"
-        f"🎯 <b>کیفیت:</b> <code>{quality} [{format_bytes(file_size)}]</code>\n"
-        f"👤 <b>کانال:</b> {item.get('uploader', 'Web')}\n\n"
-        f"⚡ <i>دانلود شده توسط @Rabodownloaderbot</i>"
+        f"🎯 <b>Quality:</b> <code>{quality} [{format_bytes(file_size)}]</code>\n"
+        f"👤 <b>Source:</b> {item.get('uploader', 'Web')}\n\n"
+        f"⚡ <i>Downloaded by @Rabodownloaderbot</i>"
     )
 
     start_time = time.time()
-    await status_msg.edit_text("🚀 <b>در حال آماده‌سازی و ارسال به تلگرام (تا سقف ۲ گیگ)...</b>")
+    await status_msg.edit_text("🚀 <b>Preparing and uploading to Telegram (up to 2 GB)...</b>")
 
     meta: Dict[str, Any] = {"duration": 0, "width": 1280, "height": 720, "thumb": None}
     if quality != "audio":
@@ -884,7 +884,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 title=item.get("title"),
                 performer=item.get("uploader"),
                 progress=progress_tracker,
-                progress_args=(status_msg, "در حال آپلود صدا به تلگرام", start_time),
+                progress_args=(status_msg, "Uploading audio to Telegram", start_time),
             )
         else:
             await client.send_video(
@@ -897,11 +897,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 thumb=meta["thumb"],
                 supports_streaming=True,
                 progress=progress_tracker,
-                progress_args=(status_msg, "در حال آپلود ویدیو به تلگرام", start_time),
+                progress_args=(status_msg, "Uploading video to Telegram", start_time),
             )
         await status_msg.delete()
     except Exception as e:
-        await status_msg.edit_text(f"❌ <b>خطا در ارسال به تلگرام:</b>\n<code>{str(e)[:150]}</code>")
+        await status_msg.edit_text(f"❌ <b>Error uploading to Telegram:</b>\n<code>{str(e)[:150]}</code>")
     finally:
         if os.path.exists(downloaded_file):
             try:
