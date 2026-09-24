@@ -4,6 +4,7 @@ import re
 import time
 from typing import Dict, Any, Optional
 
+from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from pyrogram import Client, filters
@@ -30,9 +31,53 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 CACHE: Dict[str, Dict[str, Any]] = {}
 
 # ============================================================================
+# Pyrogram Telegram Bot Client (MTProto - Supports up to 2 GB)
+# ============================================================================
+bot = Client(
+    "rabo_render_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir="/app",
+)
+
+# ============================================================================
 # FastAPI Health Service (For Render 24/7 Keep-Alive via UptimeRobot)
 # ============================================================================
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("🚀 [Startup] Initializing Telegram Downloader Service...", flush=True)
+
+    # 1. Clean up any leftover webhooks so Pyrogram MTProto receives all updates
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
+                res = await resp.json()
+                print(f"🗑️ [Webhook Cleanup] {res}", flush=True)
+    except Exception as e:
+        print(f"⚠️ [Webhook Cleanup Warning] {e}", flush=True)
+
+    # 2. Start Pyrogram MTProto Bot Client
+    print("🤖 [Startup] Connecting Pyrogram MTProto Bot Client to Telegram...", flush=True)
+    try:
+        await bot.start()
+        me = await bot.get_me()
+        print(f"✅ [Online] Bot @{me.username} ({me.first_name}) is fully active and listening!", flush=True)
+    except Exception as e:
+        print(f"❌ [Error] Failed to start Pyrogram Bot: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    yield
+
+    print("🛑 [Shutdown] Stopping Pyrogram Bot...", flush=True)
+    try:
+        await bot.stop()
+    except Exception as e:
+        print(f"⚠️ [Shutdown Warning] {e}", flush=True)
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def health_check():
@@ -53,17 +98,6 @@ async def trigger_delete_webhook():
                 return {"status": "ok", "telegram_response": data}
     except Exception as e:
         return {"status": "error", "error": str(e)}
-
-# ============================================================================
-# Pyrogram Telegram Bot Client (MTProto - Supports up to 2 GB)
-# ============================================================================
-bot = Client(
-    "rabo_render_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workdir="/app",
-)
 
 def format_bytes(size: int) -> str:
     if not size or size <= 0:
@@ -422,31 +456,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 pass
 
 # ============================================================================
-# Main Entrypoint: Start Pyrogram & FastAPI concurrently
+# Main Entrypoint: Start FastAPI with Lifespan (Starts Pyrogram + Web Server)
 # ============================================================================
-async def main():
-    print(f"🚀 Starting FastAPI Server on port {PORT}...")
-    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="warning")
-    server = uvicorn.Server(config)
-
-    # Automatically delete any old webhooks (e.g. from Supabase) so Pyrogram MTProto receives all updates
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true") as resp:
-                res = await resp.json()
-                print(f"🗑️ Cleaned up Telegram webhook: {res}")
-    except Exception as e:
-        print(f"⚠️ Webhook cleanup notice: {e}")
-
-    print("🤖 Starting Pyrogram MTProto Bot Client...")
-    await bot.start()
-    print("✅ Pyrogram Bot is running on Render!")
-
-    try:
-        await server.serve()
-    finally:
-        await bot.stop()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
