@@ -116,6 +116,68 @@ async def start_handler(_, message: Message):
     )
     await message.reply_text(welcome)
 
+async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
+    domain_match = re.search(r"https?://([^/]+)", url)
+    referer = f"https://{domain_match.group(1)}/" if domain_match else "https://bunkr.cr/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Referer": referer,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+                vid_match = (
+                    re.search(r'<source[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE) or
+                    re.search(r'<video[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE) or
+                    re.search(r'href=["\']([^"\']*(?:media-files|\.mp4|\.mkv|\.mov)[^"\']*)["\']', html, re.IGNORECASE) or
+                    re.search(r'["\']downloadUrl["\']\s*:\s*["\']([^"\']+)["\']', html) or
+                    re.search(r'["\']file["\']\s*:\s*["\']([^"\']+(?:\.mp4|\.mkv|\.mov)[^"\']*)["\']', html)
+                )
+
+                if vid_match:
+                    video_url = vid_match.group(1)
+                    if video_url.startswith("//"):
+                        video_url = "https:" + video_url
+                    elif video_url.startswith("/"):
+                        host = domain_match.group(1) if domain_match else "bunkr.cr"
+                        video_url = f"https://{host}{video_url}"
+
+                    title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE) or re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE)
+                    title = title_match.group(1).strip() if title_match else "Bunkr Video"
+                    title = re.sub(r'\s*\|\s*Bunkr.*$', '', title, flags=re.IGNORECASE).strip()
+
+                    poster_match = re.search(r'poster=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                    poster = poster_match.group(1) if poster_match else None
+
+                    filesize = 0
+                    try:
+                        async with session.head(video_url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as head_resp:
+                            if "Content-Length" in head_resp.headers:
+                                filesize = int(head_resp.headers["Content-Length"])
+                    except Exception:
+                        pass
+
+                    return {
+                        "url": video_url,
+                        "title": title,
+                        "uploader": "Bunkr",
+                        "duration": 0,
+                        "filesize": filesize,
+                        "thumbnail": poster,
+                        "is_direct": True,
+                        "referer": referer,
+                    }
+    except Exception as e:
+        print(f"[Bunkr] Resolution error: {e}")
+    return None
+
 @bot.on_message(filters.regex(r"https?://[^\s]+"))
 async def link_handler(_, message: Message):
     url = re.search(r"https?://[^\s]+", message.text).group(0)
@@ -123,20 +185,25 @@ async def link_handler(_, message: Message):
 
     loop = asyncio.get_event_loop()
 
-    def extract_info():
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
+    info = None
+    if re.search(r"bunkr\.[a-z]+|bunkrr\.[a-z]+", url, re.IGNORECASE):
+        info = await resolve_bunkr(url)
 
-    try:
-        info = await loop.run_in_executor(None, extract_info)
-    except Exception as e:
-        await status_msg.edit_text(f"❌ <b>خطا در دریافت ویدیو:</b>\n<code>{str(e)[:150]}</code>")
-        return
+    if not info:
+        def extract_info():
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        try:
+            info = await loop.run_in_executor(None, extract_info)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ <b>خطا در دریافت ویدیو:</b>\n<code>{str(e)[:150]}</code>")
+            return
 
     if not info:
         await status_msg.edit_text("❌ ویدیویی در این لینک یافت نشد.")
@@ -145,6 +212,9 @@ async def link_handler(_, message: Message):
     cache_id = str(int(time.time() * 1000))
     CACHE[cache_id] = {
         "url": url,
+        "direct_url": info.get("url") if info.get("is_direct") else None,
+        "is_direct": info.get("is_direct", False),
+        "referer": info.get("referer"),
         "title": info.get("title", "Video"),
         "uploader": info.get("uploader") or info.get("channel") or "Video",
         "duration": info.get("duration", 0),
@@ -222,39 +292,78 @@ async def callback_handler(client: Client, cq: CallbackQuery):
 
     target_url = item["url"]
     file_id = f"{cache_id}_{quality}"
-    out_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
-
     loop = asyncio.get_event_loop()
 
-    if quality == "1080":
-        format_opt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-    elif quality == "720":
-        format_opt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    else:  # audio
-        format_opt = "bestaudio/best"
+    is_direct = item.get("is_direct", False)
+    direct_url = item.get("direct_url")
 
-    ydl_opts = {
-        "format": format_opt,
-        "outtmpl": out_template,
-        "merge_output_format": "mp4" if quality != "audio" else "m4a",
-        "quiet": True,
-        "no_warnings": True,
-    }
+    if is_direct and direct_url:
+        downloaded_file = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
+        dl_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        }
+        if item.get("referer"):
+            dl_headers["Referer"] = item["referer"]
 
-    def download_task():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            res = ydl.extract_info(target_url, download=True)
-            return ydl.prepare_filename(res)
+        try:
+            import aiohttp
+            import aiofiles
+            async with aiohttp.ClientSession(headers=dl_headers) as session:
+                async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
+                    if resp.status not in (200, 206):
+                        raise Exception(f"خطای سرور دانلود (کد {resp.status})")
+                    async with aiofiles.open(downloaded_file, "wb") as f:
+                        async for chunk in resp.content.iter_chunked(1024 * 1024):
+                            await f.write(chunk)
 
-    try:
-        downloaded_file = await loop.run_in_executor(None, download_task)
-        if quality != "audio" and not downloaded_file.endswith(".mp4"):
-            base = os.path.splitext(downloaded_file)[0]
-            if os.path.exists(f"{base}.mp4"):
-                downloaded_file = f"{base}.mp4"
-    except Exception as e:
-        await status_msg.edit_text(f"❌ <b>خطا در دانلود ویدیو:</b>\n<code>{str(e)[:150]}</code>")
-        return
+            if quality == "audio":
+                audio_file = os.path.join(DOWNLOAD_DIR, f"{file_id}.m4a")
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", downloaded_file, "-vn", "-c:a", "aac", audio_file,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+                if os.path.exists(audio_file):
+                    try:
+                        os.remove(downloaded_file)
+                    except Exception:
+                        pass
+                    downloaded_file = audio_file
+        except Exception as e:
+            await status_msg.edit_text(f"❌ <b>خطا در دانلود فایل:</b>\n<code>{str(e)[:150]}</code>")
+            return
+    else:
+        out_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+        if quality == "1080":
+            format_opt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+        elif quality == "720":
+            format_opt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+        else:  # audio
+            format_opt = "bestaudio/best"
+
+        ydl_opts = {
+            "format": format_opt,
+            "outtmpl": out_template,
+            "merge_output_format": "mp4" if quality != "audio" else "m4a",
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        def download_task():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                res = ydl.extract_info(target_url, download=True)
+                return ydl.prepare_filename(res)
+
+        try:
+            downloaded_file = await loop.run_in_executor(None, download_task)
+            if quality != "audio" and not downloaded_file.endswith(".mp4"):
+                base = os.path.splitext(downloaded_file)[0]
+                if os.path.exists(f"{base}.mp4"):
+                    downloaded_file = f"{base}.mp4"
+        except Exception as e:
+            await status_msg.edit_text(f"❌ <b>خطا در دانلود ویدیو:</b>\n<code>{str(e)[:150]}</code>")
+            return
 
     if not os.path.exists(downloaded_file):
         await status_msg.edit_text("❌ فایل نهایی یافت نشد.")
