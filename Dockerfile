@@ -1,5 +1,8 @@
 FROM python:3.10-slim
 
+# Ensure Python output is sent directly to terminal without buffering
+ENV PYTHONUNBUFFERED=1
+
 # Install system dependencies: ffmpeg is required for merging 1080p video & audio
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
