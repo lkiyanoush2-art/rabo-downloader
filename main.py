@@ -6,6 +6,7 @@ import asyncio
 import threading
 import http.server
 import urllib.request
+import urllib.parse
 from typing import Dict, Any, Optional
 
 from pyrogram import Client, filters
@@ -116,7 +117,8 @@ async def start_handler(_, message: Message):
 
 async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
     domain_match = re.search(r"https?://([^/]+)", url)
-    referer = f"https://{domain_match.group(1)}/" if domain_match else "https://bunkr.cr/"
+    domain = domain_match.group(1) if domain_match else "bunkr.cr"
+    referer = f"https://{domain}/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Referer": referer,
@@ -130,6 +132,74 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                     return None
                 html = await resp.text()
 
+                # Extract title
+                title_match = (
+                    re.search(r'Original\s*=\s*([^,]+)', html) or
+                    re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE) or
+                    re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+                )
+                title = title_match.group(1).strip() if title_match else "Bunkr Video"
+                title = re.sub(r'\s*\|\s*Bunkr.*$', '', title, flags=re.IGNORECASE).strip()
+
+                # Extract thumbnail
+                cover_match = (
+                    re.search(r'var\s+videoCoverUrl\s*=\s*["\']([^"\']+)["\']', html) or
+                    re.search(r'poster=["\']([^"\']+)["\']', html, re.IGNORECASE) or
+                    re.search(r'property="og:image"\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                )
+                poster = cover_match.group(1).replace(r"\/", "/") if cover_match else None
+
+                # Extract file size
+                filesize = 0
+                size_match = re.search(r'Size\s*=\s*(\d+)', html)
+                if size_match:
+                    filesize = int(size_match.group(1))
+
+                # Method 1: Bunkr CDN signing API (jsCDN + signUrl)
+                cdn_match = re.search(r'var\s+jsCDN\s*=\s*["\']([^"\']+)["\']', html)
+                sign_match = re.search(r'var\s+signUrl\s*=\s*["\']([^"\']+)["\']', html)
+
+                if cdn_match and sign_match:
+                    raw_cdn = cdn_match.group(1).replace(r"\/", "/")
+                    sign_url = sign_match.group(1).replace(r"\/", "/")
+                    parsed_cdn = urllib.parse.urlparse(raw_cdn)
+                    encoded_path = urllib.parse.quote(parsed_cdn.path)
+                    sign_req_url = f"{sign_url}?path={encoded_path}"
+
+                    async with session.get(sign_req_url, timeout=aiohttp.ClientTimeout(total=10)) as sign_resp:
+                        if sign_resp.status == 200:
+                            sign_data = await sign_resp.json()
+                            token = sign_data.get("token")
+                            ex = sign_data.get("ex")
+                            if token and ex:
+                                final_video_url = f"{raw_cdn}?token={token}&ex={ex}"
+                                return {
+                                    "url": final_video_url,
+                                    "title": title,
+                                    "uploader": "Bunkr",
+                                    "duration": 0,
+                                    "filesize": filesize,
+                                    "thumbnail": poster,
+                                    "is_direct": True,
+                                    "referer": referer,
+                                }
+
+                # Method 2: Download button href (e.g. dl.bunkr.cr/file/...)
+                dl_btn_match = re.search(r'href=["\'](https?://dl\.bunkr\.[^/]+/file/\d+)["\']', html)
+                if dl_btn_match:
+                    dl_url = dl_btn_match.group(1)
+                    return {
+                        "url": dl_url,
+                        "title": title,
+                        "uploader": "Bunkr",
+                        "duration": 0,
+                        "filesize": filesize,
+                        "thumbnail": poster,
+                        "is_direct": True,
+                        "referer": referer,
+                    }
+
+                # Method 3: Direct video / source / media-files in HTML
                 vid_match = (
                     re.search(r'<source[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE) or
                     re.search(r'<video[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE) or
@@ -139,27 +209,11 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                 )
 
                 if vid_match:
-                    video_url = vid_match.group(1)
+                    video_url = vid_match.group(1).replace(r"\/", "/")
                     if video_url.startswith("//"):
                         video_url = "https:" + video_url
                     elif video_url.startswith("/"):
-                        host = domain_match.group(1) if domain_match else "bunkr.cr"
-                        video_url = f"https://{host}{video_url}"
-
-                    title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE) or re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE)
-                    title = title_match.group(1).strip() if title_match else "Bunkr Video"
-                    title = re.sub(r'\s*\|\s*Bunkr.*$', '', title, flags=re.IGNORECASE).strip()
-
-                    poster_match = re.search(r'poster=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                    poster = poster_match.group(1) if poster_match else None
-
-                    filesize = 0
-                    try:
-                        async with session.head(video_url, timeout=aiohttp.ClientTimeout(total=5), allow_redirects=True) as head_resp:
-                            if "Content-Length" in head_resp.headers:
-                                filesize = int(head_resp.headers["Content-Length"])
-                    except Exception:
-                        pass
+                        video_url = f"https://{domain}{video_url}"
 
                     return {
                         "url": video_url,
