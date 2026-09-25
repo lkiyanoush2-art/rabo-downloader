@@ -98,6 +98,25 @@ def format_quality_caption(width: int, height: int) -> str:
         return f"{dim}p"
     return "HD"
 
+def detect_resolution_from_text(text: str) -> int:
+    if not text:
+        return 0
+    t = text.lower()
+    if re.search(r'\b(2160p|4k|uhd)\b', t) or re.search(r'3840x2160|2160x3840', t):
+        return 2160
+    if re.search(r'\b(1440p|2k|qhd)\b', t) or re.search(r'2560x1440|1440x2560', t):
+        return 1440
+    if re.search(r'\b(1080p|fhd)\b', t) or re.search(r'1920x1080|1080x1920', t):
+        return 1080
+    if re.search(r'\b(720p|hd)\b', t) or re.search(r'1280x720|720x1280', t):
+        return 720
+    if re.search(r'\b480p\b', t) or re.search(r'854x480|480x854', t):
+        return 480
+    if re.search(r'\b360p\b', t) or re.search(r'640x360|360x640', t):
+        return 360
+    return 0
+
+
 
 async def progress_tracker(current: int, total: int, status_msg: Message, action_name: str, start_time: float):
     now = time.time()
@@ -174,6 +193,34 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                 cdn_match = re.search(r'var\s+jsCDN\s*=\s*["\']([^"\']+)["\']', html)
                 sign_match = re.search(r'var\s+signUrl\s*=\s*["\']([^"\']+)["\']', html)
 
+                def build_bunkr_dict(v_url):
+                    bunkr_h = detect_resolution_from_text(f"{title} {html}")
+                    tier_label = get_quality_label(bunkr_h) if bunkr_h > 0 else None
+                    btn_label = f"📹 {tier_label} (Original)" if tier_label else "📹 Original Quality"
+                    name_label = f"{tier_label} (Original)" if tier_label else "Original Quality"
+                    formats = [{
+                        "id": "best",
+                        "label": btn_label,
+                        "name": name_label,
+                        "height": bunkr_h,
+                        "filesize": filesize,
+                        "url": v_url,
+                    }]
+                    return {
+                        "type": "video",
+                        "url": v_url,
+                        "title": title,
+                        "uploader": "Bunkr",
+                        "duration": 0,
+                        "filesize": filesize,
+                        "thumbnail": poster,
+                        "height": bunkr_h,
+                        "formats": formats,
+                        "quality_urls": {"best": v_url, "audio": v_url},
+                        "is_direct": True,
+                        "referer": referer,
+                    }
+
                 if cdn_match and sign_match:
                     raw_cdn = cdn_match.group(1).replace(r"\/", "/")
                     sign_url = sign_match.group(1).replace(r"\/", "/")
@@ -188,33 +235,13 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                             ex = sign_data.get("ex")
                             if token and ex:
                                 final_video_url = f"{raw_cdn}?token={token}&ex={ex}"
-                                return {
-                                    "type": "video",
-                                    "url": final_video_url,
-                                    "title": title,
-                                    "uploader": "Bunkr",
-                                    "duration": 0,
-                                    "filesize": filesize,
-                                    "thumbnail": poster,
-                                    "is_direct": True,
-                                    "referer": referer,
-                                }
+                                return build_bunkr_dict(final_video_url)
 
                 # Method 2: Download button href
                 dl_btn_match = re.search(r'href=["\'](https?://dl\.bunkr\.[^/]+/file/\d+)["\']', html)
                 if dl_btn_match:
                     dl_url = dl_btn_match.group(1)
-                    return {
-                        "type": "video",
-                        "url": dl_url,
-                        "title": title,
-                        "uploader": "Bunkr",
-                        "duration": 0,
-                        "filesize": filesize,
-                        "thumbnail": poster,
-                        "is_direct": True,
-                        "referer": referer,
-                    }
+                    return build_bunkr_dict(dl_url)
 
                 # Method 3: Direct video in HTML
                 vid_match = (
@@ -232,17 +259,7 @@ async def resolve_bunkr(url: str) -> Optional[Dict[str, Any]]:
                     elif video_url.startswith("/"):
                         video_url = f"https://{domain}{video_url}"
 
-                    return {
-                        "type": "video",
-                        "url": video_url,
-                        "title": title,
-                        "uploader": "Bunkr",
-                        "duration": 0,
-                        "filesize": filesize,
-                        "thumbnail": poster,
-                        "is_direct": True,
-                        "referer": referer,
-                    }
+                    return build_bunkr_dict(video_url)
     except Exception as e:
         print(f"[Bunkr] Resolution error: {e}", flush=True)
     return None
@@ -610,10 +627,15 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
 
                         # Check table formats (single video reels)
                         table_rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
+                        table_video_items = []
                         for row in table_rows:
                             link_m = re.search(r'href=["\'](https?://[^"\']+)["\']', row)
                             if link_m:
-                                videos.append(link_m.group(1))
+                                dl_link = link_m.group(1)
+                                res_m = re.search(r'(\d+)p', row, re.IGNORECASE)
+                                h = int(res_m.group(1)) if res_m else detect_resolution_from_text(row)
+                                table_video_items.append({"url": dl_link, "height": h})
+                                videos.append(dl_link)
 
                         # Check general single download button
                         if not photos and not videos:
@@ -638,10 +660,57 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
                                 "title": "Instagram Photo",
                             }
 
+                        if table_video_items and any(item["height"] > 0 for item in table_video_items):
+                            table_video_items.sort(key=lambda x: x["height"], reverse=True)
+                            seen_tiers = set()
+                            formats_list = []
+                            quality_urls = {}
+                            for item in table_video_items:
+                                h = item["height"]
+                                tier_label = get_quality_label(h) if h > 0 else "Best"
+                                if tier_label in seen_tiers:
+                                    continue
+                                seen_tiers.add(tier_label)
+                                tier_id = str(h) if h > 0 else "best"
+                                formats_list.append({
+                                    "id": tier_id,
+                                    "label": f"📹 {tier_label}",
+                                    "name": tier_label,
+                                    "height": h,
+                                    "filesize": 0,
+                                    "url": item["url"],
+                                })
+                                quality_urls[tier_id] = item["url"]
+                                quality_urls[tier_label.lower()] = item["url"]
+
+                            quality_urls["audio"] = table_video_items[0]["url"]
+                            return {
+                                "type": "video",
+                                "url": table_video_items[0]["url"],
+                                "formats": formats_list,
+                                "quality_urls": quality_urls,
+                                "uploader": "Instagram",
+                                "title": "Instagram Video",
+                                "duration": 0,
+                                "is_direct": True,
+                            }
+
                         if videos:
+                            detected_h = detect_resolution_from_text(html) or 1080
+                            tier_label = get_quality_label(detected_h)
+                            formats_list = [{
+                                "id": "best",
+                                "label": f"📹 {tier_label} (Original)",
+                                "name": f"{tier_label} (Original)",
+                                "height": detected_h,
+                                "filesize": 0,
+                                "url": videos[0],
+                            }]
                             return {
                                 "type": "video",
                                 "url": videos[0],
+                                "formats": formats_list,
+                                "quality_urls": {"best": videos[0], "audio": videos[0]},
                                 "uploader": "Instagram",
                                 "title": "Instagram Video",
                                 "duration": 0,
@@ -809,11 +878,18 @@ async def link_handler(client: Client, message: Message):
     # ========================================================================
     video_formats = info.get("formats", [])
     if not video_formats:
-        label = "📹 Original Quality" if info.get("is_direct") else "📹 Best Quality"
-        name = "Original Quality" if info.get("is_direct") else "Best Quality"
+        h = info.get("height", 0) or detect_resolution_from_text(f"{info.get('title', '')} {url}")
+        tier_label = get_quality_label(h) if h > 0 else None
+        if tier_label:
+            label = f"📹 {tier_label} (Original)" if info.get("is_direct") else f"📹 {tier_label}"
+            name = f"{tier_label} (Original)" if info.get("is_direct") else tier_label
+        else:
+            label = "📹 Original Quality" if info.get("is_direct") else "📹 Best Quality"
+            name = "Original Quality" if info.get("is_direct") else "Best Quality"
+
         v_url = info.get("url")
         video_formats = [
-            {"id": "best", "label": label, "name": name, "height": 0, "filesize": info.get("filesize", 0), "url": v_url}
+            {"id": "best", "label": label, "name": name, "height": h, "filesize": info.get("filesize", 0), "url": v_url}
         ]
 
     cache_id = str(int(time.time() * 1000))
