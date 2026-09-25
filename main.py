@@ -773,6 +773,11 @@ async def link_handler(client: Client, message: Message):
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["visionos", "android", "tv"]
+                    }
+                },
             }
             # Check for cookies file
             if os.path.exists("/app/cookies.txt"):
@@ -1157,6 +1162,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             "merge_output_format": "mp4" if quality != "audio" else "m4a",
             "quiet": True,
             "no_warnings": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["visionos", "android", "tv"]
+                }
+            },
         }
         if os.path.exists("/app/cookies.txt"):
             ydl_opts["cookiefile"] = "/app/cookies.txt"
