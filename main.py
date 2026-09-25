@@ -24,6 +24,41 @@ import aiohttp
 import aiofiles
 
 # ============================================================================
+# yt-dlp Hot-patches & Extractor Resiliency
+# ============================================================================
+try:
+    import yt_dlp.extractor.xhamster as xh_mod
+
+    orig_xh_download = xh_mod.XHamsterIE._download_webpage_handle
+    def patched_xh_download(self, *args, **kwargs):
+        webpage, urlh = orig_xh_download(self, *args, **kwargs)
+        m = re.search(r'<title[^>]*>(.+?)(?:,\s*[^,]*?\s*Porn\s*[^,]*?:\s*xHamster[^<]*| - xHamster\.com)</title>', webpage, re.IGNORECASE)
+        if not m:
+            m = re.search(r'<h1[^>]*>([^<]+)</h1>', webpage, re.IGNORECASE)
+        if m:
+            self._last_title = m.group(1).strip()
+        return webpage, urlh
+
+    orig_xh_parse = xh_mod.XHamsterIE._parse_json
+    def patched_xh_parse(self, json_string, video_id, *args, **kwargs):
+        res = orig_xh_parse(self, json_string, video_id, *args, **kwargs)
+        if isinstance(res, dict):
+            if "videoModel" not in res:
+                res["videoModel"] = res.get("video") or res.get("videoData") or res.get("pageState", {}).get("video") or {}
+            if isinstance(res.get("videoModel"), dict):
+                vm = res["videoModel"]
+                if not vm.get("title"):
+                    vm["title"] = res.get("title") or getattr(self, "_last_title", None) or "xHamster Video"
+                vm.setdefault("sources", {})
+        return res
+
+    xh_mod.XHamsterIE._download_webpage_handle = patched_xh_download
+    xh_mod.XHamsterIE._parse_json = patched_xh_parse
+    print("✅ Applied resiliency hot-patch to XHamsterIE", flush=True)
+except Exception as e:
+    print(f"⚠️ Could not patch XHamsterIE: {e}", flush=True)
+
+# ============================================================================
 # Configurations & Credentials
 # ============================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8993469100:AAGZ2rJktVIavAIgWq_s1xCVpqPAg_3YMsw")
@@ -721,6 +756,84 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+# 4. Universal Generic Web Scraper (Zero-failure fallback for any website)
+async def resolve_generic_video(url: str) -> Optional[Dict[str, Any]]:
+    domain = urllib.parse.urlparse(url).netloc
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": url,
+    }
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+                # 1. Extract title
+                title_match = (
+                    re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.I) or
+                    re.search(r'<meta\s+name=["\']twitter:title["\']\s+content=["\']([^"\']+)["\']', html, re.I) or
+                    re.search(r'<title[^>]*>([^<]+)</title>', html, re.I) or
+                    re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.I)
+                )
+                title = title_match.group(1).strip() if title_match else "Online Video"
+                title = re.sub(r'\s*[-|]\s*[^|]+$', '', title).strip()
+
+                # 2. Extract thumbnail
+                thumb_match = (
+                    re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html, re.I) or
+                    re.search(r'<meta\s+name=["\']twitter:image["\']\s+content=["\']([^"\']+)["\']', html, re.I) or
+                    re.search(r'poster=["\']([^"\']+)["\']', html, re.I)
+                )
+                thumb = thumb_match.group(1).strip() if thumb_match else None
+
+                # 3. Extract candidate video streams
+                video_urls = []
+                patterns = [
+                    r'<meta\s+property=["\']og:video(?::secure_url|:url)?["\']\s+content=["\']([^"\']+)["\']',
+                    r'<source[^>]+src=["\']([^"\']+\.(?:mp4|m3u8|webm)[^"\']*)["\']',
+                    r'<video[^>]+src=["\']([^"\']+\.(?:mp4|m3u8|webm)[^"\']*)["\']',
+                    r'file\s*:\s*["\'](https?://[^"\']+\.(?:mp4|m3u8)[^"\']*)["\']',
+                    r'["\'](https?://[^"\']+\.(?:mp4|m3u8)[^"\']*)["\']',
+                ]
+                for pat in patterns:
+                    for m in re.finditer(pat, html, re.I):
+                        cand = m.group(1).replace(r"\/", "/")
+                        if cand not in video_urls and not re.search(r'\.(?:m4a|mp3|jpg|png|gif|css|js)(?:\?|$)', cand):
+                            video_urls.append(cand)
+
+                if video_urls:
+                    best_url = video_urls[0]
+                    detected_h = detect_resolution_from_text(f"{title} {html}") or 720
+                    tier_label = get_quality_label(detected_h)
+                    formats_list = [{
+                        "id": "best",
+                        "label": f"📹 {tier_label} (Direct)",
+                        "name": f"{tier_label} (Direct)",
+                        "height": detected_h,
+                        "filesize": 0,
+                        "url": best_url,
+                    }]
+                    return {
+                        "type": "video",
+                        "url": best_url,
+                        "title": title,
+                        "uploader": domain or "Web",
+                        "duration": 0,
+                        "thumbnail": thumb,
+                        "formats": formats_list,
+                        "quality_urls": {"best": best_url, "audio": best_url},
+                        "is_direct": True,
+                        "referer": url,
+                    }
+    except Exception as e:
+        print(f"[Universal Fallback] Error resolving {url}: {e}", flush=True)
+
+    return None
+
 # ============================================================================
 # Telegram Handlers
 # ============================================================================
@@ -776,8 +889,15 @@ async def link_handler(client: Client, message: Message):
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["visionos", "android", "tv"]
+                    },
+                    "generic": {
+                        "impersonate": ["chrome"]
                     }
                 },
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
             }
             # Check for cookies file
             if os.path.exists("/app/cookies.txt"):
@@ -835,8 +955,14 @@ async def link_handler(client: Client, message: Message):
                     "is_direct": False,
                 }
         except Exception as e:
-            await status_msg.edit_text(f"❌ <b>Error retrieving metadata:</b>\n<code>{str(e)[:150]}</code>")
-            return
+            print(f"[yt-dlp] Extraction error: {e}. Trying Universal Fallback...", flush=True)
+            info = await resolve_generic_video(url)
+            if not info:
+                await status_msg.edit_text(f"❌ <b>Error retrieving metadata:</b>\n<code>{str(e)[:150]}</code>")
+                return
+
+    if not info:
+        info = await resolve_generic_video(url)
 
     if not info:
         await status_msg.edit_text("❌ No media found in this link.")
@@ -1122,13 +1248,27 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             dl_headers["Referer"] = item["referer"]
 
         try:
-            async with aiohttp.ClientSession(headers=dl_headers) as session:
-                async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
-                    if resp.status not in (200, 206):
-                        raise Exception(f"Download server error (HTTP {resp.status})")
-                    async with aiofiles.open(downloaded_file, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 1024):
-                            await f.write(chunk)
+            if ".m3u8" in direct_url:
+                ref_h = dl_headers.get("Referer", "")
+                ua_h = dl_headers.get("User-Agent", "")
+                cmd = ["ffmpeg", "-y"]
+                if ref_h:
+                    cmd.extend(["-headers", f"Referer: {ref_h}\r\nUser-Agent: {ua_h}\r\n"])
+                cmd.extend(["-i", direct_url, "-c", "copy", downloaded_file])
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+            else:
+                async with aiohttp.ClientSession(headers=dl_headers) as session:
+                    async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
+                        if resp.status not in (200, 206):
+                            raise Exception(f"Download server error (HTTP {resp.status})")
+                        async with aiofiles.open(downloaded_file, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(1024 * 1024):
+                                await f.write(chunk)
 
             if quality == "audio":
                 audio_file = os.path.join(DOWNLOAD_DIR, f"{file_id}.m4a")
