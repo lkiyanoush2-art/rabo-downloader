@@ -63,6 +63,42 @@ def format_duration(seconds: Optional[int]) -> str:
     s = seconds % 60
     return f"{m}:{s:02d}"
 
+def get_quality_label(height: int) -> str:
+    if height >= 2160:
+        return "4K"
+    elif height >= 1440:
+        return "2K"
+    elif height >= 1080:
+        return "1080p"
+    elif height >= 720:
+        return "720p"
+    elif height >= 480:
+        return "480p"
+    elif height >= 360:
+        return "360p"
+    elif height > 0:
+        return f"{height}p"
+    return "Best"
+
+def format_quality_caption(width: int, height: int) -> str:
+    dim = min(width, height) if width > 0 and height > 0 else max(width, height)
+    if dim >= 2160:
+        return "4K (2160p)"
+    elif dim >= 1440:
+        return "2K (1440p)"
+    elif dim >= 1080:
+        return "1080p"
+    elif dim >= 720:
+        return "720p"
+    elif dim >= 480:
+        return "480p"
+    elif dim >= 360:
+        return "360p"
+    elif dim > 0:
+        return f"{dim}p"
+    return "HD"
+
+
 async def progress_tracker(current: int, total: int, status_msg: Message, action_name: str, start_time: float):
     now = time.time()
     if not hasattr(progress_tracker, "last_edit"):
@@ -281,31 +317,61 @@ async def resolve_twitter(url: str) -> Optional[Dict[str, Any]]:
                         # Sort strictly by resolution descending, then bitrate descending
                         variants.sort(key=lambda x: (x.get("height", 0), x.get("bitrate", 0)), reverse=True)
 
-                        best_mp4 = variants[0]["url"] if variants else v.get("url")
-                        if variants:
-                            url_1080 = variants[0]["url"]
-                            v_720 = next((var for var in variants if var.get("height", 0) <= 720), None)
-                            url_720 = v_720["url"] if v_720 else variants[0]["url"]
-                        else:
-                            url_1080 = best_mp4
-                            url_720 = best_mp4
-
-                        quality_urls = {
-                            "1080": url_1080,
-                            "720": url_720,
-                            "audio": url_720 or url_1080,
-                        }
-
                         duration = int(v.get("duration", 0))
-                        calc_filesize = 0
-                        if variants and variants[0].get("size"):
-                            calc_filesize = variants[0]["size"]
-                        elif variants and variants[0].get("bitrate") and duration:
-                            calc_filesize = int(variants[0]["bitrate"] * duration / 8)
+
+                        # Build discrete available format tiers (e.g. 4K, 2K, 1080p, 720p, 480p, 360p)
+                        seen_tiers = set()
+                        video_formats = []
+                        quality_urls = {}
+
+                        for var in variants:
+                            h = var["height"]
+                            tier_label = get_quality_label(h)
+                            if tier_label in seen_tiers:
+                                continue
+                            seen_tiers.add(tier_label)
+
+                            calc_sz = var.get("size") or (int(var.get("bitrate", 0) * duration / 8) if duration and var.get("bitrate") else 0)
+                            tier_id = str(h) if h > 0 else "best"
+                            video_formats.append({
+                                "id": tier_id,
+                                "label": f"📹 {tier_label}",
+                                "name": tier_label,
+                                "height": h,
+                                "filesize": calc_sz,
+                                "url": var["url"],
+                            })
+                            quality_urls[tier_id] = var["url"]
+                            quality_urls[tier_label.lower()] = var["url"]
+                            if len(video_formats) >= 4:
+                                break
+
+                        best_mp4 = variants[0]["url"] if variants else v.get("url")
+                        if not video_formats and best_mp4:
+                            video_formats.append({
+                                "id": "best",
+                                "label": "📹 Best Quality",
+                                "name": "Best Quality",
+                                "height": 0,
+                                "filesize": 0,
+                                "url": best_mp4,
+                            })
+                            quality_urls["best"] = best_mp4
+
+                        # Guarantee legacy keys exist
+                        if "1080" not in quality_urls and variants:
+                            quality_urls["1080"] = variants[0]["url"]
+                        if "720" not in quality_urls and variants:
+                            v_720 = next((var for var in variants if var.get("height", 0) <= 720), None)
+                            quality_urls["720"] = v_720["url"] if v_720 else variants[0]["url"]
+
+                        quality_urls["audio"] = video_formats[-1]["url"] if video_formats else best_mp4
+                        calc_filesize = video_formats[0]["filesize"] if video_formats else 0
 
                         return {
                             "type": "video",
-                            "url": url_1080 or best_mp4,
+                            "url": video_formats[0]["url"] if video_formats else best_mp4,
+                            "formats": video_formats,
                             "quality_urls": quality_urls,
                             "variants": variants,
                             "filesize": calc_filesize,
@@ -373,20 +439,59 @@ async def resolve_twitter(url: str) -> Optional[Dict[str, Any]]:
                                     "bitrate": bitrate,
                                 })
                         variants.sort(key=lambda x: (x.get("height", 0), x.get("bitrate", 0)), reverse=True)
-                        if variants:
-                            url_1080 = variants[0]["url"]
+                        duration = int(video_info.get("duration_millis", 0) / 1000) if video_info.get("duration_millis") else 0
+
+                        seen_tiers = set()
+                        video_formats = []
+                        quality_urls = {}
+
+                        for var in variants:
+                            h = var["height"]
+                            tier_label = get_quality_label(h)
+                            if tier_label in seen_tiers:
+                                continue
+                            seen_tiers.add(tier_label)
+
+                            calc_sz = int(var.get("bitrate", 0) * duration / 8) if duration and var.get("bitrate") else 0
+                            tier_id = str(h) if h > 0 else "best"
+                            video_formats.append({
+                                "id": tier_id,
+                                "label": f"📹 {tier_label}",
+                                "name": tier_label,
+                                "height": h,
+                                "filesize": calc_sz,
+                                "url": var["url"],
+                            })
+                            quality_urls[tier_id] = var["url"]
+                            quality_urls[tier_label.lower()] = var["url"]
+                            if len(video_formats) >= 4:
+                                break
+
+                        if not video_formats and variants:
+                            video_formats.append({
+                                "id": "best",
+                                "label": "📹 Best Quality",
+                                "name": "Best Quality",
+                                "height": 0,
+                                "filesize": 0,
+                                "url": variants[0]["url"],
+                            })
+                            quality_urls["best"] = variants[0]["url"]
+
+                        if "1080" not in quality_urls and variants:
+                            quality_urls["1080"] = variants[0]["url"]
+                        if "720" not in quality_urls and variants:
                             v_720 = next((var for var in variants if var.get("height", 0) <= 720), None)
-                            url_720 = v_720["url"] if v_720 else variants[0]["url"]
-                            quality_urls = {
-                                "1080": url_1080,
-                                "720": url_720,
-                                "audio": url_720 or url_1080,
-                            }
-                            duration = int(video_info.get("duration_millis", 0) / 1000) if video_info.get("duration_millis") else 0
-                            calc_filesize = int(variants[0]["bitrate"] * duration / 8) if duration and variants[0].get("bitrate") else 0
+                            quality_urls["720"] = v_720["url"] if v_720 else variants[0]["url"]
+
+                        quality_urls["audio"] = video_formats[-1]["url"] if video_formats else (variants[0]["url"] if variants else None)
+                        calc_filesize = video_formats[0]["filesize"] if video_formats else 0
+
+                        if variants:
                             return {
                                 "type": "video",
-                                "url": url_1080,
+                                "url": video_formats[0]["url"] if video_formats else variants[0]["url"],
+                                "formats": video_formats,
                                 "quality_urls": quality_urls,
                                 "variants": variants,
                                 "filesize": calc_filesize,
@@ -609,14 +714,50 @@ async def link_handler(client: Client, message: Message):
         try:
             raw_info = await loop.run_in_executor(None, extract_info)
             if raw_info:
+                dur = raw_info.get("duration", 0)
+                seen_tiers = set()
+                formats_list = []
+                raw_formats = raw_info.get("formats", [])
+
+                valid_vids = [f for f in raw_formats if f.get("vcodec") != "none" and f.get("height")]
+                valid_vids.sort(key=lambda x: (x.get("height", 0), x.get("tbr", 0) or x.get("filesize", 0) or 0), reverse=True)
+
+                for f in valid_vids:
+                    h = f.get("height", 0)
+                    tier_label = get_quality_label(h)
+                    if tier_label in seen_tiers:
+                        continue
+                    seen_tiers.add(tier_label)
+
+                    calc_sz = f.get("filesize") or f.get("filesize_approx") or (int(f.get("tbr", 0) * 1000 * dur / 8) if dur and f.get("tbr") else 0)
+                    formats_list.append({
+                        "id": str(h),
+                        "label": f"📹 {tier_label}",
+                        "name": tier_label,
+                        "height": h,
+                        "filesize": calc_sz,
+                    })
+                    if len(formats_list) >= 4:
+                        break
+
+                if not formats_list:
+                    formats_list.append({
+                        "id": "best",
+                        "label": "📹 Best Quality",
+                        "name": "Best Quality",
+                        "height": 0,
+                        "filesize": raw_info.get("filesize") or raw_info.get("filesize_approx") or 0,
+                    })
+
                 info = {
                     "type": "video",
                     "url": url,
                     "title": raw_info.get("title", "Video"),
                     "uploader": raw_info.get("uploader") or raw_info.get("channel") or "Web",
-                    "duration": raw_info.get("duration", 0),
+                    "duration": dur,
                     "thumbnail": raw_info.get("thumbnail"),
                     "filesize": raw_info.get("filesize") or raw_info.get("filesize_approx") or 0,
+                    "formats": formats_list,
                     "is_direct": False,
                 }
         except Exception as e:
@@ -666,11 +807,26 @@ async def link_handler(client: Client, message: Message):
     # ========================================================================
     # Case 2: Video (Bunkr, Twitter, Instagram, YouTube)
     # ========================================================================
+    video_formats = info.get("formats", [])
+    if not video_formats:
+        label = "📹 Original Quality" if info.get("is_direct") else "📹 Best Quality"
+        name = "Original Quality" if info.get("is_direct") else "Best Quality"
+        v_url = info.get("url")
+        video_formats = [
+            {"id": "best", "label": label, "name": name, "height": 0, "filesize": info.get("filesize", 0), "url": v_url}
+        ]
+
     cache_id = str(int(time.time() * 1000))
+    quality_urls = info.get("quality_urls", {})
+    if not quality_urls.get("best") and info.get("url"):
+        quality_urls["best"] = info["url"]
+    if not quality_urls.get("audio") and info.get("url"):
+        quality_urls["audio"] = info["url"]
+
     CACHE[cache_id] = {
         "url": url,
         "direct_url": info.get("url") if info.get("is_direct") else None,
-        "quality_urls": info.get("quality_urls", {}),
+        "quality_urls": quality_urls,
         "is_direct": info.get("is_direct", False),
         "referer": info.get("referer"),
         "title": info.get("title", "Video"),
@@ -678,36 +834,58 @@ async def link_handler(client: Client, message: Message):
         "duration": info.get("duration", 0),
         "thumbnail": info.get("thumbnail"),
         "variants": info.get("variants", []),
+        "formats": video_formats,
     }
 
     uploader = info.get("uploader") or "Video"
     duration_str = format_duration(info.get("duration"))
-    filesize_approx = format_bytes(info.get("filesize") or 3000000)
+
+    video_lines = []
+    for idx, vf in enumerate(video_formats, 1):
+        sz_str = f" [{format_bytes(vf['filesize'])}]" if vf.get("filesize") else ""
+        tier_tag = " ⚡" if idx == 1 else ""
+        tier_name = vf.get("name") or vf.get("label", "").replace("📹 ", "")
+        video_lines.append(f"{idx}. <i>mp4, {tier_name}{sz_str}</i>{tier_tag}")
+
+    vid_section = "\n".join(video_lines)
 
     menu_text = (
         f"<b>{uploader}</b>\n"
         f"[{duration_str}]\n\n"
-        f"📹 <b>Video</b>\n"
-        f"1. <i>mp4, 1080p [{filesize_approx}]</i> ⚡\n"
-        f"2. <i>mp4, 720p</i>\n\n"
-        f"🎧 <b>Audio</b>\n"
-        f"3. <i>m4a, mp3</i>\n\n"
+        f"📹 <b>Video Formats:</b>\n"
+        f"{vid_section}\n\n"
+        f"🎧 <b>Audio:</b>\n"
+        f"• <i>m4a, mp3</i>\n\n"
         f"⚡ <i>Select desired format:</i>"
     )
 
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📹 1080p", callback_data=f"dl:{cache_id}:1080"),
-            InlineKeyboardButton("📹 720p", callback_data=f"dl:{cache_id}:720"),
+    btn_rows = []
+    if len(video_formats) == 1:
+        btn_rows.append([
+            InlineKeyboardButton(video_formats[0]["label"], callback_data=f"dl:{cache_id}:{video_formats[0]['id']}"),
             InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio"),
-        ],
-        [
-            InlineKeyboardButton("⟳ Refresh metadata", callback_data=f"refresh:{cache_id}"),
-        ],
-        [
-            InlineKeyboardButton("← Back", callback_data="back"),
-        ],
-    ])
+        ])
+    elif len(video_formats) == 2:
+        btn_rows.append([
+            InlineKeyboardButton(video_formats[0]["label"], callback_data=f"dl:{cache_id}:{video_formats[0]['id']}"),
+            InlineKeyboardButton(video_formats[1]["label"], callback_data=f"dl:{cache_id}:{video_formats[1]['id']}"),
+            InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio"),
+        ])
+    elif len(video_formats) == 3:
+        btn_rows.append([
+            InlineKeyboardButton(vf["label"], callback_data=f"dl:{cache_id}:{vf['id']}") for vf in video_formats
+        ])
+        btn_rows.append([InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio")])
+    else:
+        for i in range(0, len(video_formats), 2):
+            chunk = video_formats[i:i+2]
+            btn_rows.append([InlineKeyboardButton(vf["label"], callback_data=f"dl:{cache_id}:{vf['id']}") for vf in chunk])
+        btn_rows.append([InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio")])
+
+    btn_rows.append([InlineKeyboardButton("⟳ Refresh metadata", callback_data=f"refresh:{cache_id}")])
+    btn_rows.append([InlineKeyboardButton("← Back", callback_data="back")])
+
+    buttons = InlineKeyboardMarkup(btn_rows)
 
     await status_msg.delete()
 
@@ -847,11 +1025,10 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         direct_url = quality_urls[quality]
     elif item.get("variants"):
         variants = item.get("variants", [])
-        if quality == "1080":
-            direct_url = variants[0]["url"]
-        elif quality == "720":
-            v_720 = next((v for v in variants if v.get("height", 0) <= 720), None)
-            direct_url = v_720["url"] if v_720 else variants[0]["url"]
+        if quality.isdigit():
+            req_h = int(quality)
+            v_match = next((v for v in variants if v.get("height", 0) <= req_h), None)
+            direct_url = v_match["url"] if v_match else variants[0]["url"]
         else:
             direct_url = variants[0]["url"]
 
@@ -891,12 +1068,12 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             return
     else:
         out_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
-        if quality == "1080":
-            format_opt = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-        elif quality == "720":
-            format_opt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-        else:  # audio
+        if quality == "audio":
             format_opt = "bestaudio/best"
+        elif quality.isdigit():
+            format_opt = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
+        else:
+            format_opt = "bestvideo+bestaudio/best"
 
         ydl_opts = {
             "format": format_opt,
@@ -932,7 +1109,10 @@ async def callback_handler(client: Client, cq: CallbackQuery):
     if quality != "audio":
         meta = await prepare_video_metadata(downloaded_file)
 
-    quality_display = f"{meta['height']}p" if quality != "audio" and meta.get("height") else quality
+    if quality == "audio":
+        quality_display = "Audio (m4a)"
+    else:
+        quality_display = format_quality_caption(meta.get("width", 0), meta.get("height", 0))
     caption = (
         f"🌐 <b>{item.get('title', 'Video')}</b>\n"
         f"🎯 <b>Quality:</b> <code>{quality_display} [{format_bytes(file_size)}]</code>\n"
