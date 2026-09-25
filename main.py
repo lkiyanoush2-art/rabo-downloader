@@ -98,11 +98,20 @@ def format_duration(seconds: Optional[int]) -> str:
     s = seconds % 60
     return f"{m}:{s:02d}"
 
+def format_count(n: Optional[int]) -> str:
+    if not n or n <= 0:
+        return ""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
 def get_quality_label(height: int) -> str:
     if height >= 2160:
-        return "4K"
+        return "2160p"
     elif height >= 1440:
-        return "2K"
+        return "1440p"
     elif height >= 1080:
         return "1080p"
     elif height >= 720:
@@ -888,7 +897,7 @@ async def link_handler(client: Client, message: Message):
                 "skip_download": True,
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["visionos", "android", "tv"]
+                        "player_client": ["visionos"]
                     },
                     "generic": {
                         "impersonate": ["chrome"]
@@ -931,7 +940,7 @@ async def link_handler(client: Client, message: Message):
                         "height": h,
                         "filesize": calc_sz,
                     })
-                    if len(formats_list) >= 4:
+                    if len(formats_list) >= 6:
                         break
 
                 if not formats_list:
@@ -949,6 +958,8 @@ async def link_handler(client: Client, message: Message):
                     "title": raw_info.get("title", "Video"),
                     "uploader": raw_info.get("uploader") or raw_info.get("channel") or "Web",
                     "duration": dur,
+                    "views": raw_info.get("view_count"),
+                    "likes": raw_info.get("like_count"),
                     "thumbnail": raw_info.get("thumbnail"),
                     "filesize": raw_info.get("filesize") or raw_info.get("filesize_approx") or 0,
                     "formats": formats_list,
@@ -1046,51 +1057,69 @@ async def link_handler(client: Client, message: Message):
 
     uploader = info.get("uploader") or "Video"
     duration_str = format_duration(info.get("duration"))
+    title_text = info.get("title", "Video")
+    url_target = info.get("url", url)
 
+    # 1. Clickable title link
+    title_link = f"<a href=\"{url_target}\"><b>{title_text}</b></a>"
+
+    # 2. Stats line (views, duration, likes, uploader)
+    stats_items = []
+    if info.get("views"):
+        stats_items.append(f"{format_count(info['views'])} views")
+    if duration_str:
+        stats_items.append(f"[{duration_str}]")
+    if info.get("likes"):
+        stats_items.append(f"{format_count(info['likes'])} likes")
+    if uploader and uploader != "Video":
+        stats_items.append(uploader)
+    stats_line = " · ".join(stats_items) if stats_items else f"[{duration_str}] · {uploader}"
+
+    # 3. Video formats list with sizes & stars for 4K/2K
     video_lines = []
     for idx, vf in enumerate(video_formats, 1):
         sz_str = f" [{format_bytes(vf['filesize'])}]" if vf.get("filesize") else ""
-        tier_tag = " ⚡" if idx == 1 else ""
+        tier_star = " ⭐" if vf.get("height", 0) >= 1440 else ""
         tier_name = vf.get("name") or vf.get("label", "").replace("📹 ", "")
-        video_lines.append(f"{idx}. <i>mp4, {tier_name}{sz_str}</i>{tier_tag}")
+        video_lines.append(f"{idx}. <i>mp4, {tier_name}{sz_str}</i>{tier_star}")
 
     vid_section = "\n".join(video_lines)
 
+    # 4. Audio section with approx size
+    audio_sz_str = ""
+    if info.get("duration"):
+        est_audio = int(16 * 1024 * info["duration"])
+        audio_sz_str = f" [{format_bytes(est_audio)}]"
+
     menu_text = (
-        f"<b>{uploader}</b>\n"
-        f"[{duration_str}]\n\n"
-        f"📹 <b>Video Formats:</b>\n"
+        f"{title_link}\n"
+        f"<b>{stats_line}</b>\n\n"
+        f"📹 <b>Video</b>\n"
         f"{vid_section}\n\n"
-        f"🎧 <b>Audio:</b>\n"
-        f"• <i>m4a, mp3</i>\n\n"
-        f"⚡ <i>Select desired format:</i>"
+        f"🎧 <b>Audio</b>\n"
+        f"• <i>m4a, 128kbps{audio_sz_str}</i>\n\n"
+        f"⚡ <i>Select quality to download:</i>"
     )
 
+    # 5. Buttons in 3-column grid layout
     btn_rows = []
-    if len(video_formats) == 1:
+    if len(video_formats) <= 3:
         btn_rows.append([
-            InlineKeyboardButton(video_formats[0]["label"], callback_data=f"dl:{cache_id}:{video_formats[0]['id']}"),
-            InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio"),
+            InlineKeyboardButton(f"📹 {vf.get('name', vf['id'])}", callback_data=f"dl:{cache_id}:{vf['id']}")
+            for vf in video_formats
         ])
-    elif len(video_formats) == 2:
-        btn_rows.append([
-            InlineKeyboardButton(video_formats[0]["label"], callback_data=f"dl:{cache_id}:{video_formats[0]['id']}"),
-            InlineKeyboardButton(video_formats[1]["label"], callback_data=f"dl:{cache_id}:{video_formats[1]['id']}"),
-            InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio"),
-        ])
-    elif len(video_formats) == 3:
-        btn_rows.append([
-            InlineKeyboardButton(vf["label"], callback_data=f"dl:{cache_id}:{vf['id']}") for vf in video_formats
-        ])
-        btn_rows.append([InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio")])
     else:
-        for i in range(0, len(video_formats), 2):
-            chunk = video_formats[i:i+2]
-            btn_rows.append([InlineKeyboardButton(vf["label"], callback_data=f"dl:{cache_id}:{vf['id']}") for vf in chunk])
-        btn_rows.append([InlineKeyboardButton("♫ Audio", callback_data=f"dl:{cache_id}:audio")])
+        for i in range(0, len(video_formats), 3):
+            chunk = video_formats[i:i+3]
+            btn_rows.append([
+                InlineKeyboardButton(f"📹 {vf.get('name', vf['id'])}", callback_data=f"dl:{cache_id}:{vf['id']}")
+                for vf in chunk
+            ])
 
-    btn_rows.append([InlineKeyboardButton("⟳ Refresh metadata", callback_data=f"refresh:{cache_id}")])
-    btn_rows.append([InlineKeyboardButton("← Back", callback_data="back")])
+    btn_rows.append([
+        InlineKeyboardButton("🎧 Audio (m4a)", callback_data=f"dl:{cache_id}:audio"),
+        InlineKeyboardButton("✖ Close", callback_data="back"),
+    ])
 
     buttons = InlineKeyboardMarkup(btn_rows)
 
@@ -1304,7 +1333,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             "no_warnings": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["visionos", "android", "tv"]
+                    "player_client": ["visionos"]
                 }
             },
         }
