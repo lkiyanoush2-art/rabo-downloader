@@ -765,6 +765,100 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+# 3.5. Turbo & Saint Resolver (Supports turbo.cr, saint2.su, saint.to, etc.)
+async def resolve_turbo(url: str) -> Optional[Dict[str, Any]]:
+    id_match = re.search(r"/(?:d|v|e|embed)/([a-zA-Z0-9_\-]+)", url)
+    if not id_match:
+        id_match = re.search(r"(?:turbo\.[a-z]+|saint2?\.[a-z]+)/([a-zA-Z0-9_\-]+)", url)
+    if not id_match:
+        return None
+
+    vid = id_match.group(1)
+    api_url = f"https://turbo.cr/api/sign?v={vid}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Referer": f"https://turbo.cr/d/{vid}",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    title = f"{vid}.mp4"
+    thumbnail = None
+    filesize = 0
+
+    try:
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+            # 1. Fetch metadata from page
+            page_url = f"https://turbo.cr/d/{vid}"
+            try:
+                async with session.get(page_url, timeout=aiohttp.ClientTimeout(total=10)) as p_resp:
+                    if p_resp.status == 200:
+                        html = await p_resp.text()
+                        t_match = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.I) or re.search(r'<title[^>]*>([^<]+)</title>', html, re.I)
+                        if t_match:
+                            raw_title = t_match.group(1).strip()
+                            raw_title = re.sub(r'^(?:Download\s+)', '', raw_title, flags=re.I)
+                            raw_title = re.sub(r'[\s\.\-_·\ufffd]*(?:turbo\.cr|download).*$', '', raw_title, flags=re.I).strip()
+                            if raw_title:
+                                title = raw_title
+
+                        im_match = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+                        if im_match:
+                            thumbnail = im_match.group(1).strip()
+
+                        sz_match = re.search(r'id=["\']fileSizeBytes["\'][^>]*>([^<]+)<', html, re.I)
+                        if sz_match:
+                            raw_sz = sz_match.group(1).replace("&#43;", "+").strip()
+                            try:
+                                filesize = int(float(raw_sz))
+                            except Exception:
+                                pass
+            except Exception as e:
+                print(f"[Turbo] Metadata page fetch notice: {e}", flush=True)
+
+            # 2. Call sign API for direct CDN video stream
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=10)) as a_resp:
+                if a_resp.status == 200:
+                    data = await a_resp.json()
+                    if data.get("success") and data.get("url"):
+                        direct_video_url = data["url"]
+                        if not direct_video_url.endswith("&dl=1"):
+                            direct_video_url += "&dl=1"
+
+                        fn = data.get("filename") or title
+                        detected_h = detect_resolution_from_text(f"{fn} {title}")
+                        tier_label = get_quality_label(detected_h) if detected_h > 0 else None
+                        btn_label = f"📹 {tier_label} (Original)" if tier_label else "📹 Original Quality"
+                        name_label = f"{tier_label} (Original)" if tier_label else "Original Quality"
+
+                        formats = [{
+                            "id": "best",
+                            "label": btn_label,
+                            "name": name_label,
+                            "height": detected_h,
+                            "filesize": filesize,
+                            "url": direct_video_url,
+                        }]
+
+                        return {
+                            "type": "video",
+                            "url": direct_video_url,
+                            "title": fn,
+                            "uploader": "Turbo",
+                            "duration": 0,
+                            "filesize": filesize,
+                            "thumbnail": thumbnail,
+                            "height": detected_h,
+                            "formats": formats,
+                            "quality_urls": {"best": direct_video_url, "audio": direct_video_url},
+                            "is_direct": True,
+                            "referer": "https://turbo.cr/",
+                        }
+    except Exception as e:
+        print(f"[Turbo] Error resolving {url}: {e}", flush=True)
+
+    return None
+
 # 4. Universal Generic Web Scraper (Zero-failure fallback for any website)
 async def resolve_generic_video(url: str) -> Optional[Dict[str, Any]]:
     domain = urllib.parse.urlparse(url).netloc
@@ -859,7 +953,7 @@ async def start_handler(_, message: Message):
         "👋 <b>Welcome to the 2GB Media Downloader Bot!</b>\n\n"
         "⚡ <i>Supports photos, carousels, and videos up to 2000 MB!</i>\n\n"
         "🚀 <b>Supported Platforms:</b>\n"
-        "• <b>Bunkr</b> (Original quality, fast CDN streaming)\n"
+        "• <b>Bunkr & Turbo</b> (Fast CDN streaming & direct media)\n"
         "• <b>Twitter / X</b> (Photos, multi-image galleries, and 1080p videos)\n"
         "• <b>Instagram</b> (Reels, video posts, single photos, and carousels)\n"
         "• <b>YouTube & TikTok</b> (HD Video & Audio)\n"
@@ -887,6 +981,10 @@ async def link_handler(client: Client, message: Message):
     # 3. Instagram
     elif re.search(r"instagram\.com", url, re.IGNORECASE):
         info = await resolve_instagram(url)
+
+    # 4. Turbo / Saint
+    elif re.search(r"turbo\.[a-z]+|saint2?\.[a-z]+", url, re.IGNORECASE):
+        info = await resolve_turbo(url)
 
     # 4. Fallback (yt-dlp for YouTube, TikTok, Reddit, etc.)
     if not info:
@@ -1291,13 +1389,20 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 )
                 await proc.communicate()
             else:
-                async with aiohttp.ClientSession(headers=dl_headers) as session:
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(headers=dl_headers, connector=connector) as session:
                     async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
                         if resp.status not in (200, 206):
                             raise Exception(f"Download server error (HTTP {resp.status})")
+                        total_sz = int(resp.headers.get("Content-Length", 0))
+                        curr_sz = 0
+                        dl_start = time.time()
                         async with aiofiles.open(downloaded_file, "wb") as f:
                             async for chunk in resp.content.iter_chunked(1024 * 1024):
                                 await f.write(chunk)
+                                curr_sz += len(chunk)
+                                if total_sz > 0:
+                                    await progress_tracker(curr_sz, total_sz, status_msg, "Downloading", dl_start)
 
             if quality == "audio":
                 audio_file = os.path.join(DOWNLOAD_DIR, f"{file_id}.m4a")
@@ -1422,14 +1527,18 @@ async def callback_handler(client: Client, cq: CallbackQuery):
 # ============================================================================
 class HealthServerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        print(f"💓 [Keep-Alive Ping] Received GET from {self.client_address[0]} (Server is live & active!)", flush=True)
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "2")
         self.end_headers()
-        self.wfile.write(b'{"status":"online","service":"Telegram 2GB Downloader Bot","max_size":"2GB"}')
+        self.wfile.write(b"OK")
 
     def do_HEAD(self):
+        print(f"💓 [Keep-Alive Ping] Received HEAD from {self.client_address[0]} (Server is live & active!)", flush=True)
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def log_message(self, format, *args):
