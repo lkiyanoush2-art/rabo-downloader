@@ -1013,8 +1013,10 @@ async def link_handler(client: Client, message: Message):
                 }
             }
             # Check for cookies file
-            if os.path.exists("/app/cookies.txt"):
-                ydl_opts["cookiefile"] = "/app/cookies.txt"
+            for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
+                if os.path.exists(cand):
+                    ydl_opts["cookiefile"] = cand
+                    break
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(url, download=False)
 
@@ -1450,8 +1452,10 @@ async def callback_handler(client: Client, cq: CallbackQuery):
                 }
             },
         }
-        if os.path.exists("/app/cookies.txt"):
-            ydl_opts["cookiefile"] = "/app/cookies.txt"
+        for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
+            if os.path.exists(cand):
+                ydl_opts["cookiefile"] = cand
+                break
 
         def download_task():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
