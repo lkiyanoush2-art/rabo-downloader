@@ -1001,7 +1001,7 @@ async def link_handler(client: Client, message: Message):
                 "skip_download": True,
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["visionos"]
+                        "player_client": ["ios", "visionos", "web_safari", "mweb"]
                     },
                     "generic": {
                         "impersonate": ["chrome"]
@@ -1446,7 +1446,7 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             "no_warnings": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["visionos"]
+                    "player_client": ["ios", "visionos", "web_safari", "mweb"]
                 }
             },
         }
