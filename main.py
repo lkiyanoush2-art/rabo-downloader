@@ -944,11 +944,15 @@ async def resolve_generic_video(url: str) -> Optional[Dict[str, Any]]:
 # Debug logger: Prints every single message received to Render logs
 @bot.on_message(group=-1)
 async def log_all_updates(_, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
     sender = message.from_user.username if (message.from_user and message.from_user.username) else (message.from_user.id if message.from_user else "Unknown")
     print(f"📩 [Incoming Telegram Message] From @{sender} (ID: {message.chat.id}): {message.text or message.caption or '[Media]'}", flush=True)
 
-@bot.on_message(filters.command("start"))
+@bot.on_message(filters.command("start") & filters.private & ~filters.bot & ~filters.me)
 async def start_handler(_, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
     welcome = (
         "👋 <b>Welcome to the 2GB Media Downloader Bot!</b>\n\n"
         "⚡ <i>Supports photos, carousels, and videos up to 2000 MB!</i>\n\n"
@@ -962,8 +966,10 @@ async def start_handler(_, message: Message):
     )
     await message.reply_text(welcome)
 
-@bot.on_message(filters.regex(r"https?://[^\s]+"))
+@bot.on_message(filters.regex(r"https?://[^\s]+") & filters.private & ~filters.bot & ~filters.me)
 async def link_handler(client: Client, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
     url = re.search(r"https?://[^\s]+", message.text or "").group(0)
     status_msg = await message.reply_text("🔎 <b>Analyzing link and retrieving metadata...</b>")
 
@@ -1234,14 +1240,16 @@ async def link_handler(client: Client, message: Message):
     await message.reply_text(menu_text, reply_markup=buttons)
 
 # Fallback helper for non-link messages
-@bot.on_message(filters.text & ~filters.command("start"))
+@bot.on_message(filters.text & filters.private & ~filters.bot & ~filters.me & ~filters.command("start"))
 async def text_fallback_handler(_, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
     text = message.text or ""
     if not re.search(r"https?://[^\s]+", text):
         await message.reply_text(
             "📥 <b>Please send a valid link!</b>\n\n"
             "Examples:\n"
-            "• Bunkr video link\n"
+            "• Bunkr or Turbo video link\n"
             "• Instagram post or reel (photos or video)\n"
             "• Twitter / X post (photos or video)\n"
             "• YouTube, TikTok, or direct video link"
