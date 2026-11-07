@@ -1040,8 +1040,11 @@ async def link_handler(client: Client, message: Message):
             }
 
             try:
+                import curl_cffi
                 from yt_dlp.networking.impersonate import ImpersonateTarget
-                ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+                ver_tuple = tuple(map(int, re.split(r'[^\d]+', curl_cffi.__version__)[:2]))
+                if (0, 10) <= ver_tuple < (0, 17) or curl_cffi.__version__ == "0.5.10":
+                    ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
             except Exception:
                 pass
 
@@ -1544,8 +1547,11 @@ async def callback_handler(client: Client, cq: CallbackQuery):
         }
 
         try:
+            import curl_cffi
             from yt_dlp.networking.impersonate import ImpersonateTarget
-            ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+            ver_tuple = tuple(map(int, re.split(r'[^\d]+', curl_cffi.__version__)[:2]))
+            if (0, 10) <= ver_tuple < (0, 17) or curl_cffi.__version__ == "0.5.10":
+                ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
         except Exception:
             pass
 
