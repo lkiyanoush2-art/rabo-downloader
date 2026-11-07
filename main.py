@@ -69,6 +69,31 @@ PORT = int(os.getenv("PORT", "10000"))
 DOWNLOAD_DIR = "/app/downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# Write cookies from YOUTUBE_COOKIES env var if provided
+if os.getenv("YOUTUBE_COOKIES"):
+    try:
+        with open("/app/cookies.txt", "w", encoding="utf-8") as f:
+            f.write(os.getenv("YOUTUBE_COOKIES"))
+        print("🍪 [Cookies] Successfully wrote /app/cookies.txt from YOUTUBE_COOKIES environment variable", flush=True)
+    except Exception as e:
+        print(f"⚠️ [Cookies Error] Could not write cookies from env: {e}", flush=True)
+
+# Default cookies for PornHub age verification & EU consent
+PORNHUB_COOKIES_FILE = "/app/pornhub_cookies.txt" if os.path.exists("/app") else "pornhub_cookies.txt"
+try:
+    with open(PORNHUB_COOKIES_FILE, "w", encoding="utf-8") as _f:
+        _f.write(
+            "# Netscape HTTP Cookie File\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\tage_verified\t1\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\thasVisited\t1\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\tplatform\tpc\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\taccessAgeDisclaimerPH\t1\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\tbs\t1\n"
+            ".pornhub.com\tTRUE\t/\tTRUE\t2147483647\til\ten\n"
+        )
+except Exception:
+    pass
+
 # In-memory session cache for URL selections
 CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -85,7 +110,7 @@ bot = Client(
 
 def format_bytes(size: int) -> str:
     if not size or size <= 0:
-        return "2.9 MB"
+        return "0 MB"
     if size >= 1024 * 1024:
         mb = size / (1024 * 1024)
         return f"{round(mb)} MB" if mb >= 10 else f"{mb:.1f} MB"
@@ -93,7 +118,7 @@ def format_bytes(size: int) -> str:
 
 def format_duration(seconds: Optional[int]) -> str:
     if not seconds or seconds <= 0:
-        return "0:15"
+        return ""
     m = seconds // 60
     s = seconds % 60
     return f"{m}:{s:02d}"
@@ -999,6 +1024,7 @@ async def link_handler(client: Client, message: Message):
                 "quiet": True,
                 "no_warnings": True,
                 "skip_download": True,
+                "source_address": "0.0.0.0",
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["visionos", "android"]
@@ -1012,33 +1038,87 @@ async def link_handler(client: Client, message: Message):
                     "Accept-Language": "en-US,en;q=0.9",
                 }
             }
-            # Check for cookies file
-            for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
-                if os.path.exists(cand):
-                    ydl_opts["cookiefile"] = cand
-                    break
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(url, download=False)
 
-        try:
-            raw_info = await loop.run_in_executor(None, extract_info)
-            if raw_info:
-                dur = raw_info.get("duration", 0)
+            try:
+                from yt_dlp.networking.impersonate import ImpersonateTarget
+                ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+            except Exception:
+                pass
+
+            # Check for cookies file
+            cookie_cand = None
+            for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
+                if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                    cookie_cand = cand
+                    break
+
+            if not cookie_cand and re.search(r"pornhub\.[a-z]+", url, re.I):
+                if os.path.exists(PORNHUB_COOKIES_FILE):
+                    cookie_cand = PORNHUB_COOKIES_FILE
+
+            if cookie_cand:
+                ydl_opts["cookiefile"] = cookie_cand
+                if "youtube" in str(cookie_cand).lower():
+                    ydl_opts["extractor_args"]["youtube"]["player_client"] = ["web", "mweb", "ios", "visionos"]
+                print(f"🍪 [Cookies] Found and loaded cookies from {cookie_cand}", flush=True)
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                r_info = ydl.extract_info(url, download=False)
+                if not r_info:
+                    return None
+
+                dur = r_info.get("duration", 0)
+                raw_formats = r_info.get("formats", [])
+                
+                # Gather available video heights (excluding storyboards/thumbnails < 144)
+                candidate_heights = set()
+                for f in raw_formats:
+                    h = f.get("height")
+                    if h and h >= 144:
+                        candidate_heights.add(h)
+
+                sorted_heights = sorted(list(candidate_heights), reverse=True)
                 seen_tiers = set()
                 formats_list = []
-                raw_formats = raw_info.get("formats", [])
 
-                valid_vids = [f for f in raw_formats if f.get("vcodec") != "none" and f.get("height")]
-                valid_vids.sort(key=lambda x: (x.get("height", 0), x.get("tbr", 0) or x.get("filesize", 0) or 0), reverse=True)
-
-                for f in valid_vids:
-                    h = f.get("height", 0)
+                for h in sorted_heights:
                     tier_label = get_quality_label(h)
                     if tier_label in seen_tiers:
                         continue
                     seen_tiers.add(tier_label)
 
-                    calc_sz = f.get("filesize") or f.get("filesize_approx") or (int(f.get("tbr", 0) * 1000 * dur / 8) if dur and f.get("tbr") else 0)
+                    calc_sz = 0
+                    try:
+                        # Exactly matches how callback_handler downloads:
+                        selector = ydl.build_format_selector(f"bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+                        selected = list(selector({"formats": raw_formats}))
+                        for sf in selected:
+                            sz = sf.get("filesize") or sf.get("filesize_approx")
+                            if not sz:
+                                vbr = sf.get("vbr") or 0
+                                abr = sf.get("abr") or 0
+                                tbr = sf.get("tbr") or (vbr + abr)
+                                if tbr and dur:
+                                    proto = sf.get("protocol", "") or ""
+                                    # HLS m3u8 bandwidth is peak container bitrate; VBR average is ~60% of peak
+                                    ratio = 0.60 if ("m3u8" in proto or "hls" in str(sf.get("format_id", "")).lower()) else 1.0
+                                    sz = int(tbr * ratio * 1000 * dur / 8)
+                            if sz:
+                                calc_sz += sz
+                    except Exception:
+                        pass
+
+                    if not calc_sz:
+                        # Fallback for formats if selector returned nothing
+                        matching = [f for f in raw_formats if f.get("height") == h]
+                        if matching:
+                            best_match = matching[0]
+                            calc_sz = best_match.get("filesize") or best_match.get("filesize_approx") or 0
+                            if not calc_sz and best_match.get("tbr") and dur:
+                                proto = best_match.get("protocol", "") or ""
+                                ratio = 0.60 if ("m3u8" in proto or "hls" in str(best_match.get("format_id", "")).lower()) else 1.0
+                                calc_sz = int(best_match.get("tbr") * ratio * 1000 * dur / 8)
+
                     formats_list.append({
                         "id": str(h),
                         "label": f"📹 {tier_label}",
@@ -1055,8 +1135,17 @@ async def link_handler(client: Client, message: Message):
                         "label": "📹 Best Quality",
                         "name": "Best Quality",
                         "height": 0,
-                        "filesize": raw_info.get("filesize") or raw_info.get("filesize_approx") or 0,
+                        "filesize": r_info.get("filesize") or r_info.get("filesize_approx") or 0,
                     })
+
+                r_info["calculated_formats"] = formats_list
+                return r_info
+
+        try:
+            raw_info = await loop.run_in_executor(None, extract_info)
+            if raw_info:
+                dur = raw_info.get("duration", 0)
+                formats_list = raw_info.get("calculated_formats", [])
 
                 info = {
                     "type": "video",
@@ -1067,7 +1156,7 @@ async def link_handler(client: Client, message: Message):
                     "views": raw_info.get("view_count"),
                     "likes": raw_info.get("like_count"),
                     "thumbnail": raw_info.get("thumbnail"),
-                    "filesize": raw_info.get("filesize") or raw_info.get("filesize_approx") or 0,
+                    "filesize": formats_list[0]["filesize"] if formats_list else (raw_info.get("filesize") or raw_info.get("filesize_approx") or 0),
                     "formats": formats_list,
                     "is_direct": False,
                 }
@@ -1179,7 +1268,7 @@ async def link_handler(client: Client, message: Message):
         stats_items.append(f"{format_count(info['likes'])} likes")
     if uploader and uploader != "Video":
         stats_items.append(uploader)
-    stats_line = " · ".join(stats_items) if stats_items else f"[{duration_str}] · {uploader}"
+    stats_line = " · ".join(stats_items) if stats_items else (f"[{duration_str}] · {uploader}" if duration_str else uploader)
 
     # 3. Video formats list with sizes & stars for 4K/2K
     video_lines = []
@@ -1446,16 +1535,35 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             "merge_output_format": "mp4" if quality != "audio" else "m4a",
             "quiet": True,
             "no_warnings": True,
+            "source_address": "0.0.0.0",
             "extractor_args": {
                 "youtube": {
                     "player_client": ["visionos", "android"]
                 }
             },
         }
+
+        try:
+            from yt_dlp.networking.impersonate import ImpersonateTarget
+            ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
+        except Exception:
+            pass
+
+        cookie_cand = None
         for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
-            if os.path.exists(cand):
-                ydl_opts["cookiefile"] = cand
+            if os.path.exists(cand) and os.path.getsize(cand) > 0:
+                cookie_cand = cand
                 break
+
+        if not cookie_cand and re.search(r"pornhub\.[a-z]+", target_url, re.I):
+            if os.path.exists(PORNHUB_COOKIES_FILE):
+                cookie_cand = PORNHUB_COOKIES_FILE
+
+        if cookie_cand:
+            ydl_opts["cookiefile"] = cookie_cand
+            if "youtube" in str(cookie_cand).lower():
+                ydl_opts["extractor_args"]["youtube"]["player_client"] = ["web", "mweb", "ios", "visionos"]
+            print(f"🍪 [Cookies] Download using cookiefile: {cookie_cand}", flush=True)
 
         def download_task():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
