@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import time
 import re
 import asyncio
@@ -93,6 +94,99 @@ try:
         )
 except Exception:
     pass
+
+# Dynamic Instagram Cookies Manager (Supports sessionid, Netscape format, and env variables)
+INSTAGRAM_COOKIES_FILE = "/app/instagram_cookies.txt" if os.path.exists("/app") else os.path.join(os.path.dirname(os.path.abspath(__file__)), "instagram_cookies.txt")
+
+def setup_instagram_cookies() -> Optional[str]:
+    raw_cookies = os.getenv("INSTAGRAM_COOKIES", "").strip()
+    session_id = os.getenv("INSTAGRAM_SESSIONID", "").strip()
+
+    # 1. Check existing shared cookies files
+    for cand in ["/app/cookies.txt", "cookies.txt"]:
+        if os.path.exists(cand) and os.path.getsize(cand) > 0:
+            try:
+                with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read()
+                    if "instagram.com" in txt:
+                        return cand
+            except Exception:
+                pass
+
+    # 2. Check if already generated and non-empty
+    if not raw_cookies and not session_id:
+        if os.path.exists(INSTAGRAM_COOKIES_FILE) and os.path.getsize(INSTAGRAM_COOKIES_FILE) > 0:
+            return INSTAGRAM_COOKIES_FILE
+        return None
+
+    # 3. Generate from environment variable
+    try:
+        lines = ["# Netscape HTTP Cookie File"]
+        now = int(time.time()) + 180 * 86400
+        if raw_cookies:
+            if "# Netscape" in raw_cookies or "\t" in raw_cookies:
+                with open(INSTAGRAM_COOKIES_FILE, "w", encoding="utf-8") as f:
+                    f.write(raw_cookies)
+                return INSTAGRAM_COOKIES_FILE
+            for part in raw_cookies.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\t{k.strip()}\t{v.strip()}")
+        elif session_id:
+            ds_user_id = session_id.split("%3A")[0] if "%3A" in session_id else ""
+            lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\tsessionid\t{session_id}")
+            if ds_user_id:
+                lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\tds_user_id\t{ds_user_id}")
+
+        with open(INSTAGRAM_COOKIES_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"🍪 [Cookies] Instagram cookies prepared at {INSTAGRAM_COOKIES_FILE}", flush=True)
+        return INSTAGRAM_COOKIES_FILE
+    except Exception as e:
+        print(f"⚠️ [Cookies] Error preparing Instagram cookies: {e}", flush=True)
+        return None
+
+def save_instagram_session_cookie(content: str) -> bool:
+    content = (content or "").strip()
+    if not content:
+        return False
+    try:
+        now = int(time.time()) + 180 * 86400
+        lines = ["# Netscape HTTP Cookie File"]
+
+        if "# Netscape" in content or "\t" in content:
+            with open(INSTAGRAM_COOKIES_FILE, "w", encoding="utf-8") as f:
+                f.write(content.strip() + "\n")
+            for target in ["/app/cookies.txt", "cookies.txt"]:
+                try:
+                    with open(target, "a", encoding="utf-8") as f:
+                        f.write("\n" + content.strip() + "\n")
+                except Exception:
+                    pass
+            print(f"🍪 [Cookies] Netscape cookies file written to {INSTAGRAM_COOKIES_FILE}", flush=True)
+            return True
+
+        if "=" in content:
+            for part in content.split(";"):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\t{k.strip()}\t{v.strip()}")
+        else:
+            sid = content
+            ds_user_id = sid.split("%3A")[0] if "%3A" in sid else ""
+            lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\tsessionid\t{sid}")
+            if ds_user_id:
+                lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{now}\tds_user_id\t{ds_user_id}")
+
+        with open(INSTAGRAM_COOKIES_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"🍪 [Cookies] Instagram session saved to {INSTAGRAM_COOKIES_FILE}", flush=True)
+        return True
+    except Exception as e:
+        print(f"⚠️ [Cookies] Failed to save Instagram cookie: {e}", flush=True)
+        return False
 
 # In-memory session cache for URL selections
 CACHE: Dict[str, Dict[str, Any]] = {}
@@ -636,8 +730,132 @@ def _decode_snap_app(h: str, u: str, n: str, t: str, e: str, r: str) -> str:
     except Exception:
         return raw
 
-async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
-    # 1. SnapSave / SnapInsta Decoder
+def _parse_instagram_ytdlp(r_info: Dict[str, Any], url: str) -> Optional[Dict[str, Any]]:
+    uploader = r_info.get("uploader") or r_info.get("channel") or "Instagram"
+    title = r_info.get("title") or "Instagram Media"
+    dur = r_info.get("duration", 0)
+
+    # 1. Check for playlist / carousel entries (multiple photos / videos)
+    entries = r_info.get("entries")
+    if entries:
+        photos = []
+        videos = []
+        for e in entries:
+            if not e:
+                continue
+            fmts = e.get("formats", [])
+            vid_url = e.get("url")
+            has_vid = any(f.get("vcodec") != "none" and f.get("vcodec") is not None for f in fmts) or (
+                vid_url and (".mp4" in vid_url or "video" in str(e.get("ext", "")).lower())
+            )
+            if has_vid:
+                best_v = fmts[-1].get("url") if fmts else vid_url
+                if best_v:
+                    videos.append(best_v)
+            else:
+                img_url = e.get("url")
+                if not img_url and e.get("thumbnails"):
+                    img_url = e["thumbnails"][-1].get("url")
+                if img_url:
+                    photos.append(img_url)
+
+        if photos and not videos:
+            return {
+                "type": "photos",
+                "photos": photos,
+                "uploader": uploader,
+                "title": title,
+            }
+        if videos and not photos and len(videos) == 1:
+            detected_h = 1080
+            tier_label = get_quality_label(detected_h)
+            formats_list = [{
+                "id": "best",
+                "label": f"📹 {tier_label} (Original)",
+                "name": f"{tier_label} (Original)",
+                "height": detected_h,
+                "filesize": 0,
+                "url": videos[0],
+            }]
+            return {
+                "type": "video",
+                "url": videos[0],
+                "title": title,
+                "uploader": uploader,
+                "duration": dur,
+                "formats": formats_list,
+                "quality_urls": {"best": videos[0], "audio": videos[0]},
+                "is_direct": True,
+            }
+
+    # 2. Check single entry / item
+    raw_formats = r_info.get("formats", [])
+    has_video = any(f.get("vcodec") != "none" and f.get("vcodec") is not None for f in raw_formats) or (
+        r_info.get("ext") in ["mp4", "webm", "m4v"] or dur > 0
+    )
+
+    if not has_video:
+        # Single photo
+        p_url = r_info.get("url")
+        if not p_url and r_info.get("thumbnails"):
+            p_url = r_info["thumbnails"][-1].get("url")
+        if p_url:
+            return {
+                "type": "photos",
+                "photos": [p_url],
+                "uploader": uploader,
+                "title": title,
+            }
+
+    # 3. Single video / reel / story
+    candidate_heights = set()
+    for f in raw_formats:
+        h = f.get("height")
+        if h and h >= 144:
+            candidate_heights.add(h)
+
+    sorted_heights = sorted(list(candidate_heights), reverse=True)
+    seen_tiers = set()
+    formats_list = []
+    for h in sorted_heights:
+        tier_label = get_quality_label(h)
+        if tier_label in seen_tiers:
+            continue
+        seen_tiers.add(tier_label)
+        formats_list.append({
+            "id": str(h),
+            "label": f"📹 {tier_label}",
+            "name": tier_label,
+            "height": h,
+            "filesize": 0,
+        })
+        if len(formats_list) >= 5:
+            break
+
+    if not formats_list:
+        formats_list.append({
+            "id": "best",
+            "label": "📹 Best Quality",
+            "name": "Best Quality",
+            "height": 0,
+            "filesize": r_info.get("filesize") or r_info.get("filesize_approx") or 0,
+        })
+
+    return {
+        "type": "video",
+        "url": url,
+        "title": title,
+        "uploader": uploader,
+        "duration": dur,
+        "views": r_info.get("view_count"),
+        "likes": r_info.get("like_count"),
+        "thumbnail": r_info.get("thumbnail"),
+        "filesize": formats_list[0]["filesize"] if formats_list else 0,
+        "formats": formats_list,
+        "is_direct": False,
+    }
+
+async def _resolve_instagram_snapsave(url: str) -> Optional[Dict[str, Any]]:
     headers = {
         "Accept": "*/*",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -649,7 +867,7 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post("https://snapsave.app/action.php?lang=en", data=post_data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.post("https://snapsave.app/action.php?lang=en", data=post_data, timeout=aiohttp.ClientTimeout(total=12)) as resp:
                 if resp.status == 200:
                     resp_text = await resp.text()
 
@@ -675,8 +893,6 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
                         html = _decode_snap_app(h, u, n, t, e, r)
 
                     if html and "alert" not in html:
-                        # Extract items
-                        # Check carousel or download items
                         download_cards = re.findall(r'<div[^>]*class=["\'][^"\']*download-items[^"\']*["\'][^>]*>(.*?)</div>\s*</div>', html, re.DOTALL)
                         photos = []
                         videos = []
@@ -694,7 +910,6 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
                                 else:
                                     videos.append(dl_url or thumb)
 
-                        # Check table formats (single video reels)
                         table_rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
                         table_video_items = []
                         for row in table_rows:
@@ -706,7 +921,6 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
                                 table_video_items.append({"url": dl_link, "height": h})
                                 videos.append(dl_link)
 
-                        # Check general single download button
                         if not photos and not videos:
                             single_btn = re.search(r'href=["\'](https?://[^"\']+)["\'][^>]*>.*?Download\s*(Video|Photo)', html, re.DOTALL | re.IGNORECASE)
                             if single_btn:
@@ -717,7 +931,6 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
                                 else:
                                     videos.append(target)
 
-                        # Clean any duplicate or None items
                         photos = [p for p in photos if p and p.startswith("http")]
                         videos = [v for v in videos if v and v.startswith("http")]
 
@@ -789,6 +1002,117 @@ async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
         print(f"[Instagram] SnapSave error: {e}", flush=True)
 
     return None
+
+async def resolve_instagram(url: str) -> Optional[Dict[str, Any]]:
+    clean_url = url.split("?")[0].rstrip("/") + "/"
+    story_match = re.search(r"instagram\.com/stories/([^/?#&]+)/(\d+)", url)
+
+    # 1. Try SnapSave decoder
+    try:
+        snap_res = await _resolve_instagram_snapsave(url)
+        if snap_res:
+            return snap_res
+    except Exception:
+        pass
+
+    # 2. Try authenticated yt-dlp
+    ig_cookie_file = setup_instagram_cookies()
+    if ig_cookie_file and os.path.exists(ig_cookie_file):
+        loop = asyncio.get_event_loop()
+        def _extract_ig():
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "cookiefile": ig_cookie_file,
+                "source_address": "0.0.0.0",
+                "extractor_args": {
+                    "instagram": {
+                        "api": ["graphql", "web"]
+                    }
+                },
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+
+        try:
+            r_info = await loop.run_in_executor(None, _extract_ig)
+            if r_info:
+                parsed = _parse_instagram_ytdlp(r_info, url)
+                if parsed:
+                    return parsed
+        except Exception as e:
+            print(f"[Instagram] yt-dlp cookie extraction error: {e}", flush=True)
+            return {
+                "type": "error",
+                "message": (
+                    "🔒 <b>Your Instagram session cookie is expired or invalid</b>\n\n"
+                    "Please send an updated session ID to this bot:\n"
+                    "<code>/cookie YOUR_SESSIONID</code>\n\n"
+                    "<i>Or upload a fresh <code>cookies.txt</code> file directly into this chat.</i>"
+                )
+            }
+
+    # 3. If story without cookies: return helpful guide immediately
+    if story_match:
+        return {
+            "type": "error",
+            "message": (
+                "🔒 <b>Instagram Stories require login session</b>\n\n"
+                "Instagram strictly restricts Stories to authenticated users.\n\n"
+                "<b>To activate downloading:</b>\n"
+                "1. Send your Instagram session ID to this bot:\n"
+                "<code>/cookie YOUR_SESSIONID</code>\n\n"
+                "<i>Or upload your <code>cookies.txt</code> file directly into this chat.</i>"
+            )
+        }
+
+    # 4. Try unauthenticated yt-dlp for public posts/reels
+    loop = asyncio.get_event_loop()
+    def _extract_ig_anon():
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "source_address": "0.0.0.0",
+            "extractor_args": {
+                "instagram": {
+                    "api": ["graphql", "web"]
+                }
+            },
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        r_info = await loop.run_in_executor(None, _extract_ig_anon)
+        if r_info:
+            parsed = _parse_instagram_ytdlp(r_info, url)
+            if parsed:
+                return parsed
+    except Exception as e:
+        print(f"[Instagram] yt-dlp anon extraction error: {e}", flush=True)
+
+    # 5. Failed without cookies: provide clear activation instructions
+    return {
+        "type": "error",
+        "message": (
+            "🔒 <b>Instagram requires login session</b>\n\n"
+            "Instagram restricts anonymous downloads from cloud servers.\n\n"
+            "<b>To activate downloading:</b>\n"
+            "1. Send your Instagram session ID to this bot:\n"
+            "<code>/cookie YOUR_SESSIONID</code>\n\n"
+            "<i>Or upload your <code>cookies.txt</code> file directly into this chat.</i>"
+        )
+    }
 
 # 3.5. Turbo & Saint Resolver (Supports turbo.cr, saint2.su, saint.to, etc.)
 async def resolve_turbo(url: str) -> Optional[Dict[str, Any]]:
@@ -984,12 +1308,92 @@ async def start_handler(_, message: Message):
         "🚀 <b>Supported Platforms:</b>\n"
         "• <b>Bunkr & Turbo</b> (Fast CDN streaming & direct media)\n"
         "• <b>Twitter / X</b> (Photos, multi-image galleries, and 1080p videos)\n"
-        "• <b>Instagram</b> (Reels, video posts, single photos, and carousels)\n"
+        "• <b>Instagram</b> (Reels, stories, single photos, and carousels)\n"
         "• <b>YouTube & TikTok</b> (HD Video & Audio)\n"
         "• <b>Direct media and video links</b>\n\n"
+        "🍪 <b>Instagram Access:</b>\n"
+        "To enable private stories or bypass restrictions, use <code>/cookie YOUR_SESSIONID</code> or send your <code>cookies.txt</code> file here.\n\n"
         "📥 <b>Simply send any post or video link to get started!</b>"
     )
     await message.reply_text(welcome)
+
+@bot.on_message(filters.command(["cookie", "cookies", "session"]) & filters.private & ~filters.bot & ~filters.me)
+async def cookie_command_handler(client: Client, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
+
+    text = message.text or ""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        guide = (
+            "🍪 <b>Instagram Cookie Setup Guide</b>\n\n"
+            "To download Instagram Stories, Reels, and Photos without restrictions, provide your session ID:\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/cookie YOUR_SESSION_ID</code>\n\n"
+            "<b>How to get your session ID:</b>\n"
+            "1. Open <b>instagram.com</b> in your browser and log in.\n"
+            "2. Press <code>F12</code> (Developer Tools) -> <b>Application</b> (or <b>Storage</b>) -> <b>Cookies</b>.\n"
+            "3. Find the cookie named <code>sessionid</code> and copy its Value.\n"
+            "4. Send: <code>/cookie &lt;pasted value&gt;</code>\n\n"
+            "<i>Alternatively, upload your <code>cookies.txt</code> file directly to this bot!</i>"
+        )
+        await message.reply_text(guide)
+        return
+
+    val = parts[1].strip()
+    if save_instagram_session_cookie(val):
+        await message.reply_text(
+            "✅ <b>Instagram cookies successfully saved!</b>\n\n"
+            "🎉 Instagram Reels, Stories, Photos, and Carousels are now unlocked.\n\n"
+            "📥 <b>Send any Instagram link now to download!</b>"
+        )
+    else:
+        await message.reply_text("❌ <b>Failed to parse and save cookie. Please check format and try again.</b>")
+
+@bot.on_message(filters.document & filters.private & ~filters.bot & ~filters.me)
+async def document_cookie_handler(client: Client, message: Message):
+    if message.outgoing or (message.from_user and (message.from_user.is_self or message.from_user.is_bot)):
+        return
+
+    doc = message.document
+    fname = (doc.file_name or "").lower()
+    if not (fname.endswith(".txt") or "cookie" in fname):
+        return
+
+    status = await message.reply_text("⏳ <b>Processing cookies file...</b>")
+    try:
+        file_path = await message.download()
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        saved_any = False
+        if "instagram.com" in content or "sessionid" in content:
+            save_instagram_session_cookie(content)
+            saved_any = True
+
+        for cand in ["/app/cookies.txt", "cookies.txt"]:
+            try:
+                with open(cand, "w", encoding="utf-8") as f:
+                    f.write(content)
+                saved_any = True
+                break
+            except Exception:
+                pass
+
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+        if saved_any:
+            await status.edit_text(
+                "✅ <b>Cookies file received and applied successfully!</b>\n\n"
+                "🚀 YouTube and Instagram downloads are now fully unlocked."
+            )
+        else:
+            await status.edit_text("⚠️ <b>File received, but no supported cookies found inside.</b>")
+    except Exception as e:
+        await status.edit_text(f"❌ <b>Error saving cookie file:</b>\n<code>{str(e)[:150]}</code>")
 
 @bot.on_message(filters.regex(r"https?://[^\s]+") & filters.private & ~filters.bot & ~filters.me)
 async def link_handler(client: Client, message: Message):
@@ -1017,7 +1421,12 @@ async def link_handler(client: Client, message: Message):
     elif re.search(r"turbo\.[a-z]+|saint2?\.[a-z]+", url, re.IGNORECASE):
         info = await resolve_turbo(url)
 
-    # 4. Fallback (yt-dlp for YouTube, TikTok, Reddit, etc.)
+    # 5. Check for resolver-level errors (e.g. cookie requirement / private content)
+    if info and info.get("type") == "error":
+        await status_msg.edit_text(info.get("message", "❌ Error resolving media."))
+        return
+
+    # 6. Fallback (yt-dlp for YouTube, TikTok, Reddit, etc.)
     if not info:
         def extract_info():
             ydl_opts = {
@@ -1028,9 +1437,6 @@ async def link_handler(client: Client, message: Message):
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["visionos", "android"]
-                    },
-                    "generic": {
-                        "impersonate": ["chrome"]
                     }
                 },
                 "http_headers": {
@@ -1039,21 +1445,17 @@ async def link_handler(client: Client, message: Message):
                 }
             }
 
-            try:
-                import curl_cffi
-                from yt_dlp.networking.impersonate import ImpersonateTarget
-                ver_tuple = tuple(map(int, re.split(r'[^\d]+', curl_cffi.__version__)[:2]))
-                if (0, 10) <= ver_tuple < (0, 17) or curl_cffi.__version__ == "0.5.10":
-                    ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
-            except Exception:
-                pass
-
             # Check for cookies file
             cookie_cand = None
             for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
                 if os.path.exists(cand) and os.path.getsize(cand) > 0:
                     cookie_cand = cand
                     break
+
+            if not cookie_cand and re.search(r"instagram\.com", url, re.I):
+                ig_cand = setup_instagram_cookies()
+                if ig_cand and os.path.exists(ig_cand):
+                    cookie_cand = ig_cand
 
             if not cookie_cand and re.search(r"pornhub\.[a-z]+", url, re.I):
                 if os.path.exists(PORNHUB_COOKIES_FILE):
@@ -1069,6 +1471,11 @@ async def link_handler(client: Client, message: Message):
                 r_info = ydl.extract_info(url, download=False)
                 if not r_info:
                     return None
+
+                if re.search(r"instagram\.com", url, re.I):
+                    parsed_ig = _parse_instagram_ytdlp(r_info, url)
+                    if parsed_ig:
+                        return parsed_ig
 
                 dur = r_info.get("duration", 0)
                 raw_formats = r_info.get("formats", [])
@@ -1147,31 +1554,55 @@ async def link_handler(client: Client, message: Message):
         try:
             raw_info = await loop.run_in_executor(None, extract_info)
             if raw_info:
-                dur = raw_info.get("duration", 0)
-                formats_list = raw_info.get("calculated_formats", [])
+                if raw_info.get("type") in ["photos", "error"]:
+                    info = raw_info
+                else:
+                    dur = raw_info.get("duration", 0)
+                    formats_list = raw_info.get("calculated_formats", [])
 
-                info = {
-                    "type": "video",
-                    "url": url,
-                    "title": raw_info.get("title", "Video"),
-                    "uploader": raw_info.get("uploader") or raw_info.get("channel") or "Web",
-                    "duration": dur,
-                    "views": raw_info.get("view_count"),
-                    "likes": raw_info.get("like_count"),
-                    "thumbnail": raw_info.get("thumbnail"),
-                    "filesize": formats_list[0]["filesize"] if formats_list else (raw_info.get("filesize") or raw_info.get("filesize_approx") or 0),
-                    "formats": formats_list,
-                    "is_direct": False,
-                }
+                    info = {
+                        "type": "video",
+                        "url": url,
+                        "title": raw_info.get("title", "Video"),
+                        "uploader": raw_info.get("uploader") or raw_info.get("channel") or "Web",
+                        "duration": dur,
+                        "views": raw_info.get("view_count"),
+                        "likes": raw_info.get("like_count"),
+                        "thumbnail": raw_info.get("thumbnail"),
+                        "filesize": formats_list[0]["filesize"] if formats_list else (raw_info.get("filesize") or raw_info.get("filesize_approx") or 0),
+                        "formats": formats_list,
+                        "is_direct": False,
+                    }
         except Exception as e:
             print(f"[yt-dlp] Extraction error: {e}. Trying Universal Fallback...", flush=True)
             info = await resolve_generic_video(url)
             if not info:
-                await status_msg.edit_text(f"❌ <b>Error retrieving metadata:</b>\n<code>{str(e)[:150]}</code>")
+                err_str = str(e)
+                if "instagram.com" in url.lower():
+                    await status_msg.edit_text(
+                        "🔒 <b>Instagram requires login session</b>\n\n"
+                        "Instagram blocks anonymous downloads from server IPs.\n\n"
+                        "<b>To activate downloading:</b>\n"
+                        "Send your Instagram session ID to this bot:\n"
+                        "<code>/cookie YOUR_SESSIONID</code>\n\n"
+                        "<i>Or send your <code>cookies.txt</code> file here.</i>"
+                    )
+                    return
+                if "pornhub" in url.lower() and "403" in err_str:
+                    await status_msg.edit_text(
+                        "❌ <b>Pornhub has blocked server requests (HTTP 403 Forbidden).</b>\n\n"
+                        "<i>Pornhub restricts access from cloud hosting IPs.</i>"
+                    )
+                    return
+                await status_msg.edit_text(f"❌ <b>Error retrieving metadata:</b>\n<code>{err_str[:150]}</code>")
                 return
 
     if not info:
         info = await resolve_generic_video(url)
+
+    if info and info.get("type") == "error":
+        await status_msg.edit_text(info.get("message", "❌ Error resolving media."))
+        return
 
     if not info:
         await status_msg.edit_text("❌ No media found in this link.")
@@ -1546,20 +1977,16 @@ async def callback_handler(client: Client, cq: CallbackQuery):
             },
         }
 
-        try:
-            import curl_cffi
-            from yt_dlp.networking.impersonate import ImpersonateTarget
-            ver_tuple = tuple(map(int, re.split(r'[^\d]+', curl_cffi.__version__)[:2]))
-            if (0, 10) <= ver_tuple < (0, 17) or curl_cffi.__version__ == "0.5.10":
-                ydl_opts["impersonate"] = ImpersonateTarget.from_str("chrome")
-        except Exception:
-            pass
-
         cookie_cand = None
         for cand in ["/app/cookies.txt", "/app/www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies.txt"]:
             if os.path.exists(cand) and os.path.getsize(cand) > 0:
                 cookie_cand = cand
                 break
+
+        if not cookie_cand and re.search(r"instagram\.com", target_url, re.I):
+            ig_cand = setup_instagram_cookies()
+            if ig_cand and os.path.exists(ig_cand):
+                cookie_cand = ig_cand
 
         if not cookie_cand and re.search(r"pornhub\.[a-z]+", target_url, re.I):
             if os.path.exists(PORNHUB_COOKIES_FILE):
